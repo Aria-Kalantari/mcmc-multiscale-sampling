@@ -110,8 +110,66 @@
   max accepted norm ratio `3.5306`, LU candidate max norm `43.8965`, SVD
   candidate max norm `12.4050`, expected Gaussian norm `6.7456`, LU acceptance
   `0.260`, SVD acceptance `0.263`, and accepted-chain LU drift was visible.
-- No M5 soft constraints, c=0 experiment, Streamlit app, or Phase 2
-  abstractions have been added.
+- No Streamlit app or Phase 2 abstractions have been added.
+
+## M5 Implementation
+
+- Experiment numbering shift: the original SPEC names separate M5 experiments
+  `exp03_minnorm_fix.py`, `exp04_c_zero.py`, and `exp05_soft_constraints.py`.
+  This repository already uses `exp01` through `exp04`, so the M5 comparison
+  is implemented as `experiments/exp05_stability_fixes.py`.
+- SVD/minimum-norm hard conditioning is the stable hard baseline. Its
+  particular solution has near-zero hidden null component, so repeated
+  conditioning does not accumulate LU-style drift.
+- Stabilized LU computes the arbitrary pivot-column LU particular solution and
+  then removes its null component:
+  `theta_p_stable = theta_p_lu - Z @ (Z.T @ theta_p_lu)`. This preserves
+  `A theta = c`, removes `Z.T @ theta_p`, reduces the norm, and matches the
+  SVD minimum-norm solution on the controlled tests.
+- The c=0 diagnostic uses `c_used = 0`, `theta_p = 0`, and
+  `theta_candidate = Z @ (Z.T @ theta_proposed)`. It is stable because there is
+  no particular solution to re-inject, but it is biased because it ignores the
+  true buffer values. With `c=0`, the particular-solution method is irrelevant:
+  both LU and SVD return the zero particular solution.
+- Soft conditioning uses the regularized objectives
+  `0.5 ||theta||^2 + 0.5 rho ||A theta - c||^2` for the diagnostic
+  build-from-scratch solution and
+  `0.5 ||x - theta||^2 + 0.5 rho ||A x - c||^2` for the sampler map.
+  `soft_min_norm_particular` is the diagnostic/build-from-scratch analog;
+  `soft_project` is the map used by the sampler each step.
+- The soft formulas are solved through the small SPD system
+  `I + rho A A.T`, without explicit matrix inverses. Larger `rho` reduces the
+  constraint residual and approaches hard conditioning; smaller `rho` stays
+  closer to the proposed coefficients and permits larger residuals.
+- M5 keeps the M4 likelihood-ratio debug acceptance and candidate-vs-accepted
+  norm tracking. This is intentional: accepted-chain drift can still be masked
+  by rejection, so generated candidate diagnostics remain essential.
+- Sampler-state field semantics for M5:
+  hard modes store the actual particular solution in `theta_p`,
+  `theta_n_candidate = Z @ (Z.T @ theta_proposed)`, and
+  `hidden_null_norm = ||Z.T @ theta_p||`; c=0 hard mode uses zero `theta_p`,
+  zero hidden-null norm, and `cond_B=None`; soft mode uses zero `theta_p`,
+  stores the full soft candidate in `theta_n_candidate`, sets
+  `hidden_null_norm=np.nan`, and uses `cond_B=None`.
+- The CI-fast sampler stability regression uses a reduced grid and checks
+  `lu_max / svd_max > 1.3`,
+  `lu_stabilized_max / svd_max < 1.5`, and
+  `soft_midrho_max / lu_max < 0.9`. These thresholds are looser than the
+  default experiment because the test is intentionally short.
+- The default observed run `python -m experiments.exp05_stability_fixes`
+  measured LU/SVD max candidate norm ratio `3.5386`, LU/SVD max accepted norm
+  ratio `3.5306`, LU-stabilized/SVD max candidate norm ratio `1.0000`, and
+  LU-stabilized/SVD max accepted norm ratio `1.0000`. LU candidate/accepted
+  max norms were `43.8965` and `43.5067` versus SVD `12.4050` and `12.3227`;
+  the expected Gaussian norm was `6.7456`.
+- The same default run reported c=0 final accepted relative-k error
+  `7.8210e-01` versus SVD `7.8680e-01`. This was stable but remains a biased
+  diagnostic path because the buffer data are replaced by zero.
+- The default soft rho sweep showed the expected residual tradeoff:
+  mean residuals decreased from `1.6114e-01` at `rho=1e0` to `4.9117e-05` at
+  `rho=1e4`, while candidate max norms approached the hard SVD scale. Final
+  relative-k errors stayed near `7.86e-01` to `7.95e-01` for this synthetic
+  single-subdomain run.
 
 ## Deviations From SPEC.md
 

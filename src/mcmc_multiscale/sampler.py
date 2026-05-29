@@ -14,6 +14,8 @@ from mcmc_multiscale.conditioning.constraints import (
 )
 from mcmc_multiscale.conditioning.nullspace import null_basis, project_null
 from mcmc_multiscale.conditioning.particular import lu_pivot, svd_min_norm
+from mcmc_multiscale.conditioning.project import stabilize
+from mcmc_multiscale.conditioning.soft import soft_project
 from mcmc_multiscale.config import Config
 from mcmc_multiscale.covariance import exp_covariance
 from mcmc_multiscale.diagnostics import (
@@ -127,7 +129,17 @@ def _particular_solution(
     if theta_p_method == "lu":
         theta_p, info = lu_pivot(A, c)
         return theta_p, null_basis(A), info.rankA, info.cond_effective, info.cond_B
-    raise ValueError("theta_p_method must be 'lu' or 'svd'.")
+    if theta_p_method == "lu_stabilized":
+        theta_p_lu, info = lu_pivot(A, c)
+        Z = null_basis(A)
+        return (
+            stabilize(theta_p_lu, Z),
+            Z,
+            info.rankA,
+            info.cond_effective,
+            info.cond_B,
+        )
+    raise ValueError("theta_p_method must be 'lu', 'svd', or 'lu_stabilized'.")
 
 
 def conditioned_sampler(
@@ -139,6 +151,9 @@ def conditioned_sampler(
     beta: float | None = None,
     update_scheme: str = "single",
     proposal: str = "pcn",
+    rhs_mode: str = "data",
+    conditioning_mode: str = "hard",
+    rho: float | None = None,
 ) -> Iterator[ConditionedSamplerState]:
     """Run the M4 single-subdomain repeated-conditioning harness.
 
@@ -151,6 +166,27 @@ def conditioned_sampler(
         raise ValueError("n_iter must be at least 1.")
     if update_scheme != "single":
         raise NotImplementedError("M4 implements only update_scheme='single'.")
+    if rhs_mode not in {"data", "zero"}:
+        raise ValueError("rhs_mode must be 'data' or 'zero'.")
+    if conditioning_mode not in {"hard", "soft"}:
+        raise ValueError("conditioning_mode must be 'hard' or 'soft'.")
+    allowed_theta_methods = {"lu", "svd", "lu_stabilized"}
+    if conditioning_mode == "soft":
+        allowed_theta_methods = allowed_theta_methods | {"soft"}
+    if theta_p_method not in allowed_theta_methods:
+        raise ValueError(
+            "theta_p_method must be 'lu', 'svd', or 'lu_stabilized'"
+            + (
+                " (or 'soft' for soft conditioning)."
+                if conditioning_mode == "soft"
+                else "."
+            )
+        )
+    if conditioning_mode == "soft":
+        if rho is None or not np.isfinite(float(rho)) or float(rho) <= 0.0:
+            raise ValueError("soft conditioning requires rho > 0.")
+    elif rho is not None and (not np.isfinite(float(rho)) or float(rho) <= 0.0):
+        raise ValueError("rho must be positive when provided.")
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
@@ -185,14 +221,34 @@ def conditioned_sampler(
 
     for iteration in range(1, n_iter + 1):
         accepted_vec = G_accepted.ravel(order="F")
-        c = build_c(accepted_vec, sub.local_global_idx, cond_local_idx)
-        theta_p, Z, _, cond_A, cond_B = _particular_solution(A, c, theta_p_method)
+        c_data = build_c(accepted_vec, sub.local_global_idx, cond_local_idx)
+        c_used = np.zeros_like(c_data) if rhs_mode == "zero" else c_data
+        Z = null_basis(A)
+
+        if conditioning_mode == "hard" and rhs_mode == "zero":
+            theta_p = np.zeros(Next, dtype=np.float64)
+            _, _, _, cond_A, _ = _particular_solution(A, c_used, "svd")
+            cond_B = None
+        elif conditioning_mode == "hard":
+            theta_p, Z, _, cond_A, cond_B = _particular_solution(
+                A, c_used, theta_p_method
+            )
+        else:
+            _, _, _, cond_A, _ = _particular_solution(A, c_used, "svd")
+            cond_B = None
+            theta_p = np.zeros(Next, dtype=np.float64)
 
         theta_proposed = _proposal_from_current(
             theta_local_accepted, beta_value, proposal, rng
         )
-        theta_n_candidate = project_null(Z, theta_proposed)
-        theta_local_candidate = theta_p + theta_n_candidate
+        if conditioning_mode == "soft":
+            theta_local_candidate = soft_project(theta_proposed, A, c_used, float(rho))
+            theta_n_candidate = theta_local_candidate.copy()
+            hidden_null_norm = np.nan
+        else:
+            theta_n_candidate = project_null(Z, theta_proposed)
+            theta_local_candidate = theta_p + theta_n_candidate
+            hidden_null_norm = 0.0 if rhs_mode == "zero" else theta_norm(Z.T @ theta_p)
 
         G_local_candidate = field_from_theta(
             Phi_ext, lambda_local, theta_local_candidate
@@ -217,9 +273,10 @@ def conditioned_sampler(
             log_like_accepted = log_like_candidate
             theta_local_accepted = theta_local_candidate.copy()
 
-        c_after = build_c(
+        c_after_data = build_c(
             G_accepted.ravel(order="F"), sub.local_global_idx, cond_local_idx
         )
+        c_after = np.zeros_like(c_after_data) if rhs_mode == "zero" else c_after_data
         yield ConditionedSamplerState(
             iteration=iteration,
             G_accepted=G_accepted.copy(),
@@ -241,10 +298,10 @@ def conditioned_sampler(
             theta_norm_candidate=theta_norm(theta_local_candidate),
             theta_p_norm=theta_norm(theta_p),
             theta_n_candidate_norm=theta_norm(theta_n_candidate),
-            hidden_null_norm=theta_norm(Z.T @ theta_p),
+            hidden_null_norm=hidden_null_norm,
             expected_norm=expected_norm,
             constraint_residual_candidate=constraint_residual(
-                A, theta_local_candidate, c
+                A, theta_local_candidate, c_used
             ),
             constraint_residual_accepted=constraint_residual(
                 A, theta_local_accepted, c_after
