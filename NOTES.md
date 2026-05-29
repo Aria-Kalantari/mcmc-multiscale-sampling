@@ -61,8 +61,9 @@
   gave acceptance `0.9373` and `beta=3.0` gave acceptance `0.3765`.
 - One-step stationarity sanity from standard-normal initial states measured
   max mean shift `6.7805e-03` and max covariance shift `1.0228e-02`.
-- No conditioned sampler, LU/pivot instability reproduction, soft constraints,
-  or Streamlit code has been added yet.
+- M3 itself added no conditioned sampler, LU/pivot instability reproduction,
+  soft constraints, or Streamlit code; those were introduced by later
+  milestones.
 
 ## M4 Implementation
 
@@ -110,7 +111,7 @@
   max accepted norm ratio `3.5306`, LU candidate max norm `43.8965`, SVD
   candidate max norm `12.4050`, expected Gaussian norm `6.7456`, LU acceptance
   `0.260`, SVD acceptance `0.263`, and accepted-chain LU drift was visible.
-- No Streamlit app or Phase 2 abstractions have been added.
+- M4 itself added no Streamlit app or Phase 2 abstractions.
 
 ## M5 Implementation
 
@@ -128,9 +129,14 @@
   SVD minimum-norm solution on the controlled tests.
 - The c=0 diagnostic uses `c_used = 0`, `theta_p = 0`, and
   `theta_candidate = Z @ (Z.T @ theta_proposed)`. It is stable because there is
-  no particular solution to re-inject, but it is biased because it ignores the
-  true buffer values. With `c=0`, the particular-solution method is irrelevant:
-  both LU and SVD return the zero particular solution.
+  no particular solution to re-inject. With `c=0`, the particular-solution
+  method is irrelevant: both LU and SVD return the zero particular solution.
+- The c=0 path is conceptually biased because it ignores the actual buffer
+  values and forces homogeneous seam constraints. In the current
+  single-subdomain synthetic run, final relative-k error is similar to SVD, so
+  the bias is not strongly visible in that metric. It should be interpreted
+  through the constraint/interface behavior and the fact that it no longer
+  enforces compatibility with the frozen neighbor field values.
 - Soft conditioning uses the regularized objectives
   `0.5 ||theta||^2 + 0.5 rho ||A theta - c||^2` for the diagnostic
   build-from-scratch solution and
@@ -163,13 +169,42 @@
   max norms were `43.8965` and `43.5067` versus SVD `12.4050` and `12.3227`;
   the expected Gaussian norm was `6.7456`.
 - The same default run reported c=0 final accepted relative-k error
-  `7.8210e-01` versus SVD `7.8680e-01`. This was stable but remains a biased
-  diagnostic path because the buffer data are replaced by zero.
+  `7.8210e-01` versus SVD `7.8680e-01`; this metric was similar in the current
+  single-subdomain synthetic setting even though the c=0 constraint remains
+  conceptually biased.
 - The default soft rho sweep showed the expected residual tradeoff:
   mean residuals decreased from `1.6114e-01` at `rho=1e0` to `4.9117e-05` at
   `rho=1e4`, while candidate max norms approached the hard SVD scale. Final
   relative-k errors stayed near `7.86e-01` to `7.95e-01` for this synthetic
   single-subdomain run.
+
+## M6 Implementation
+
+- M6 is visualization-only. The Streamlit dashboard does not implement new
+  conditioning formulas, TPFA logic, Bayesian logic, or sampler behavior.
+- `src/mcmc_multiscale/app_core.py` is the shared Streamlit-free helper for
+  running methods and summarizing `ConditionedSamplerState` sequences. It calls
+  the existing `conditioned_sampler`; both the dashboard and
+  `experiments/exp05_stability_fixes.py` use it.
+- Streamlit is imported only in `app/streamlit_app.py`. The helper module is
+  covered by tests and remains importable without Streamlit.
+- The dashboard defaults are `Mb=16`, `n_iter=100`, `beta=0.2`, `seed=7`,
+  pCN proposals, hard conditioning, data RHS, and the selected particular
+  method. Soft mode passes `rho`; hard mode passes `rho=None` so stale widget
+  values do not affect hard runs.
+- The app stores completed runs in `st.session_state`. Changing widgets after a
+  run does not recompute the sampler until `Run` is clicked again; `Reset`
+  clears stored results.
+- The LU-vs-SVD comparison checkbox runs the same settings twice through the
+  shared helper with hard/data LU and hard/data SVD, then displays candidate
+  and accepted norm traces plus LU/SVD max-norm ratios.
+- The M5 comparison checkbox runs a responsive subset of the stability-fix
+  comparison: LU, SVD, LU-stabilized, c=0 SVD, and soft rows at `rho=1e1` and
+  `rho=1e3`. The full headless sweep remains
+  `python -m experiments.exp05_stability_fixes`.
+- Dashboard limitations: M6 is a batch-run viewer rather than a pause/resume
+  live streaming controller; it covers the existing single-subdomain M4/M5
+  sampler modes only; large iteration counts can take noticeably longer.
 
 ## Deviations From SPEC.md
 
