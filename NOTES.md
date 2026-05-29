@@ -205,3 +205,45 @@
 - Dashboard limitations: M6 is a batch-run viewer rather than a pause/resume
   live streaming controller; it covers the existing single-subdomain M4/M5
   sampler modes only; large iteration counts can take noticeably longer.
+
+## M7 Implementation
+
+- `make_subdomain_at(cfg, row, col)` builds arbitrary coarse subdomains using
+  zero-based coarse coordinates. The existing `make_subdomain(cfg)` preserves
+  the one-based `Config.target_row` and `Config.target_col` convention by
+  translating them internally.
+- The checkerboard color convention is `color = (row + col) % 2` on zero-based
+  coarse coordinates. Edge-adjacent coarse subdomains have opposite colors;
+  diagonal neighbors may share a color.
+- The red-black implementation is deterministic and sequential. During each
+  color pass, all subdomains of that color build their conditioning RHS from
+  the same frozen global field snapshot. Local updates are then attempted in
+  sorted `(row, col)` order.
+- Because overlapping subdomains can couple diagonal same-color regions, the
+  2-color schedule is not an exact same-color parallel-independence guarantee.
+  Exact independence would require a stronger coloring strategy such as
+  4-coloring or additional overlap analysis.
+- Each coarse subdomain carries its own accepted local coefficient vector in a
+  dictionary keyed by `(row, col)`. When that subdomain is revisited, pCN or
+  random-walk proposals start from its own previous accepted local vector.
+- Red-black uses the same M4/M5 likelihood-ratio debug acceptance convention:
+  `log_alpha = log_like_candidate - log_like_current`. It does not redesign
+  the MCMC acceptance theory.
+- The default red-black demonstration uses stable hard SVD conditioning with
+  data RHS and pCN proposals. LU remains available through the sampler, but the
+  M7 default demonstrates the update schedule rather than the LU instability.
+- In red-black sweeps, conditioning RHS values are dynamic across sweeps and
+  across color passes because the global field changes as other subdomains are
+  accepted. This differs from the single-subdomain M4/M5 harness, where the
+  selected buffer values were effectively constant.
+- The red-black implementation is single-machine and sequential. It does not
+  use multiprocessing, distributed execution, or accelerators.
+- The default observed run `python -m experiments.exp06_red_black_updates`
+  used `3` sweeps over a `4 x 4` coarse partition for `48` local updates. It
+  visited both colors and all `16` subdomains, with acceptance rate `0.6458`,
+  final relative-k error `8.1855e-01`, constraint residual mean/max
+  `1.5359e-15 / 8.4514e-15`, accepted interface-jump mean `2.9789e-01`,
+  candidate theta-norm mean/max `6.0086 / 7.1052`, expected Gaussian norm
+  `6.7456`, and max candidate norm / expected norm `1.0533`.
+- Final public-release notes: the repository contains synthetic examples only,
+  no private data, and no tool-instruction files.
