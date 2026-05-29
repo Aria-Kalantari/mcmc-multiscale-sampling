@@ -39,12 +39,26 @@ Do not implement MCMC, pCN proposals, conditioned sampler integration,
 diagnostics, LU instability reproduction, soft constraints, Streamlit, or Phase
 2 generalization unless a later task explicitly asks for them.
 
+## Phase 3 / M3 Scope
+
+M3 adds only:
+
+- `proposals.py`
+- `mcmc.py`
+- proposal and MCMC tests
+- optional `experiments/exp03_mcmc_gaussian_sanity.py`
+
+Do not implement the integrated conditioned sampler, LU/pivot instability
+reproduction, SVD fix experiments inside MCMC, soft constraints, Streamlit, or
+Phase 2 abstractions unless a later task explicitly asks for them.
+
 ## Commands
 
 ```bash
 python -m pytest
 python -m experiments.exp01_static_conditioning
 python -m experiments.exp02_forward_bayes_sanity
+python -m experiments.exp03_mcmc_gaussian_sanity
 python -m ruff check .
 python -m black --check .
 ```
