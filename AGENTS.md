@@ -80,6 +80,19 @@ M5 adds only:
 Do not add Streamlit, Phase 2 abstractions, private data, or full-sampler
 architecture changes unless a later task explicitly asks for them.
 
+## Phase 6 / M6 Scope
+
+M6 adds only:
+
+- `app/streamlit_app.py`
+- Streamlit-free app/reporting helpers in `src/mcmc_multiscale/`
+- lightweight helper tests
+- documentation for launching the dashboard
+
+The app is a viewer/controller for existing M1-M5 code. It must not add new
+conditioning formulas, sampler logic, TPFA logic, Bayesian logic, Streamlit
+imports outside `app/streamlit_app.py`, private data, or Phase 2 abstractions.
+
 ## Commands
 
 ```bash
@@ -89,6 +102,7 @@ python -m experiments.exp02_forward_bayes_sanity
 python -m experiments.exp03_mcmc_gaussian_sanity
 python -m experiments.exp04_reproduce_instability
 python -m experiments.exp05_stability_fixes
+python -m streamlit run app/streamlit_app.py
 python -m ruff check .
 python -m black --check .
 ```
