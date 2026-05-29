@@ -53,6 +53,16 @@ diagnostics: IAT, ESS, Gelman-Rubin R-hat, 90% log-field credible-interval
 coverage, and a plain global-pCN reference chain for the same synthetic
 posterior.
 
+Use the opt-in convergence deep-dive for a longer compute-fair comparison:
+
+```bash
+python -m experiments.exp08_convergence_diagnostics --long
+```
+
+The deep-dive reports conservative ESS per 1000 forward solves and ESS per
+wall-second alongside recovery and coverage. The plain exp08 command keeps its
+responsive defaults for routine development.
+
 ## Dashboard
 
 ```bash

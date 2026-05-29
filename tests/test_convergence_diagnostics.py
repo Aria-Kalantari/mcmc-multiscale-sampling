@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from argparse import Namespace
+
 import numpy as np
 import pytest
 
+from experiments.exp08_convergence_diagnostics import _resolved_lengths
 from mcmc_multiscale.config import Config
 from mcmc_multiscale.diagnostics import (
     credible_interval_coverage,
@@ -10,6 +13,7 @@ from mcmc_multiscale.diagnostics import (
     gelman_rubin,
     integrated_autocorr_time,
     posterior_summary,
+    sampling_efficiency,
 )
 
 
@@ -46,6 +50,69 @@ def test_gelman_rubin_distinguishes_mixed_and_disjoint_chains() -> None:
 
     assert gelman_rubin(mixed) == pytest.approx(1.0, abs=0.01)
     assert gelman_rubin(disjoint) > 2.0
+
+
+def test_sampling_efficiency_normalizes_ess_by_compute_cost() -> None:
+    per_thousand_solves, per_second = sampling_efficiency(
+        total_ess=25.0, total_forward_solves=5_000, wall_seconds=10.0
+    )
+
+    assert per_thousand_solves == pytest.approx(5.0)
+    assert per_second == pytest.approx(2.5)
+
+
+def test_sampling_efficiency_rejects_invalid_costs() -> None:
+    with pytest.raises(ValueError, match="forward"):
+        sampling_efficiency(1.0, 0, 1.0)
+    with pytest.raises(ValueError, match="wall"):
+        sampling_efficiency(1.0, 1, 0.0)
+
+
+def test_exp08_long_profile_is_opt_in_and_overridable() -> None:
+    responsive = _resolved_lengths(
+        Namespace(
+            long=False,
+            single_iter=None,
+            red_black_sweeps=None,
+            global_iter=None,
+        )
+    )
+    long = _resolved_lengths(
+        Namespace(
+            long=True,
+            single_iter=None,
+            red_black_sweeps=None,
+            global_iter=None,
+        )
+    )
+    overridden = _resolved_lengths(
+        Namespace(
+            long=True,
+            single_iter=11,
+            red_black_sweeps=12,
+            global_iter=13,
+        )
+    )
+
+    assert (
+        responsive.single_iter,
+        responsive.red_black_sweeps,
+        responsive.global_iter,
+    ) == (
+        200,
+        10,
+        500,
+    )
+    assert (long.single_iter, long.red_black_sweeps, long.global_iter) == (
+        2_000,
+        100,
+        5_000,
+    )
+    assert (
+        overridden.single_iter,
+        overridden.red_black_sweeps,
+        overridden.global_iter,
+    ) == (11, 12, 13)
 
 
 def test_posterior_summary_returns_per_cell_mean_and_std() -> None:

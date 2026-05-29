@@ -344,3 +344,46 @@
   enough to justify investigating the constraint-manifold route in SPEC
   section 3.8(b) alongside longer-chain validation. The current evidence does
   not support claiming that the `~0.79` floor is purely data-limited.
+
+## M9 Convergence Deep-Dive
+
+- `experiments/exp08_convergence_diagnostics.py --long` is an opt-in
+  convergence profile. The routine command remains responsive with `200`
+  single-subdomain iterations, `10` red-black sweeps, and `500` global-pCN
+  iterations per chain. The long profile uses `2000`, `100`, and `5000`,
+  respectively. Individual lengths remain overridable from the command line.
+- The experiment streams sampler states while collecting only retained fields
+  and scalar diagnostics. This reduces diagnostic memory use without changing
+  sampler consumption or numerical behavior.
+- The compute-fair table uses a conservative scalar ESS: the minimum total ESS
+  across data misfit, projected global-theta norm, and the first three
+  projected global KLE coefficients. It reports the maximum `R_hat` across the
+  same scalars.
+- Forward-solve counts include actual scheme-local solves: one solve for each
+  candidate evaluation plus initialization solves. Wall time includes
+  scheme-local setup. Shared truth and global-KLE preparation occur before
+  scheme timing.
+- Compute-normalized metrics are conservative ESS per `1000` forward solves
+  and conservative ESS per wall-second. They should only be interpreted as
+  efficiency comparisons after the corresponding chains satisfy the
+  convergence threshold.
+- The observed opt-in run
+  `python -m experiments.exp08_convergence_diagnostics --long` used `4`
+  chains, `2000` single-subdomain iterations, `100` red-black sweeps, and
+  `5000` global-pCN iterations per chain. Posterior-mean relative-k errors were
+  `8.6142e-01`, `7.5519e-01`, and `5.9621e-01`, respectively. Central `90%`
+  log-field interval coverages were `0.861`, `0.893`, and `0.882`.
+- Ten times the responsive proposal budget still did not establish
+  convergence. Maximum reported `R_hat` values were `364.650` for
+  single-subdomain, `16.461` for red-black, and `9.631` for global pCN.
+  Conservative total ESS values were `11.96`, `11.13`, and `15.92`.
+- The corresponding compute-fair solve counts were `8008`, `6408`, and
+  `20004`; wall times were `136.76`, `106.53`, and `292.11` seconds.
+  Conservative ESS per `1000` solves were `1.493`, `1.736`, and `0.796`;
+  conservative ESS per second were `0.087`, `0.104`, and `0.054`.
+- These efficiencies remain diagnostic-only because no scheme met the
+  `R_hat <= 1.05` threshold. The long run does not justify claiming that the
+  residual floor is data-limited. Red-black is preliminarily more
+  solve-efficient, while global pCN still has materially lower relative-k.
+  Route SPEC section 3.8(b) is warranted as an investigation alongside
+  longer-chain runs, but the current evidence does not prove it is the fix.

@@ -108,6 +108,23 @@ def effective_sample_size(x: np.ndarray, max_lag: int | None = None) -> float:
     return float(x_arr.size / integrated_autocorr_time(x_arr, max_lag=max_lag))
 
 
+def sampling_efficiency(
+    total_ess: float, total_forward_solves: int, wall_seconds: float
+) -> tuple[float, float]:
+    """Return ESS per 1000 forward solves and ESS per wall second."""
+
+    if total_ess < 0.0 or not np.isfinite(total_ess):
+        raise ValueError("total_ess must be finite and non-negative.")
+    if total_forward_solves <= 0:
+        raise ValueError("total_forward_solves must be positive.")
+    if wall_seconds <= 0.0 or not np.isfinite(wall_seconds):
+        raise ValueError("wall_seconds must be finite and positive.")
+    return (
+        float(1_000.0 * total_ess / total_forward_solves),
+        float(total_ess / wall_seconds),
+    )
+
+
 def gelman_rubin(chains: np.ndarray) -> float:
     """Return split-free Gelman-Rubin `R_hat` for scalar chains.
 

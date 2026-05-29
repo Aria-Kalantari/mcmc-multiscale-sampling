@@ -6,6 +6,7 @@ import argparse
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from time import perf_counter
 from typing import Sequence
 
 import numpy as np
@@ -25,6 +26,7 @@ from mcmc_multiscale.diagnostics import (  # noqa: E402
     integrated_autocorr_time,
     posterior_summary,
     relative_error,
+    sampling_efficiency,
 )
 from mcmc_multiscale.field import (  # noqa: E402
     field_from_theta,
@@ -58,6 +60,12 @@ class SchemeSummary:
     coverage: float
     acceptance_rate: float
     n_retained_per_chain: int
+    total_forward_solves: int
+    wall_seconds: float
+    conservative_total_ess: float
+    max_r_hat: float
+    ess_per_1000_solves: float
+    ess_per_second: float
     scalar_summaries: tuple[ScalarSummary, ...]
 
 
@@ -68,6 +76,16 @@ class _ChainSamples:
     theta_norm: np.ndarray
     coefficients: np.ndarray
     acceptance_rate: float
+    forward_solves: int
+    wall_seconds: float
+
+
+@dataclass(frozen=True)
+class _RunLengths:
+    profile: str
+    single_iter: int
+    red_black_sweeps: int
+    global_iter: int
 
 
 class _TruthReplayGenerator:
@@ -167,44 +185,54 @@ def _conditioned_chain(
         initial_scale=initial_scale,
     )
     if update_scheme == "single":
-        states = list(
-            conditioned_sampler(
-                cfg=cfg,
-                n_iter=n_iter,
-                Mb=Mb,
-                theta_p_method="svd",
-                rng=rng,  # type: ignore[arg-type]
-                beta=beta,
-                acceptance="posterior",
-            )
+        expected_updates = n_iter
+        states = conditioned_sampler(
+            cfg=cfg,
+            n_iter=n_iter,
+            Mb=Mb,
+            theta_p_method="svd",
+            rng=rng,  # type: ignore[arg-type]
+            beta=beta,
+            acceptance="posterior",
         )
     elif update_scheme == "red_black":
-        states = list(
-            red_black_conditioned_sampler(
-                cfg=cfg,
-                n_sweeps=n_iter,
-                Mb=Mb,
-                theta_p_method="svd",
-                rng=rng,  # type: ignore[arg-type]
-                beta=beta,
-                acceptance="posterior",
-            )
+        expected_updates = n_iter * n_subdomains
+        states = red_black_conditioned_sampler(
+            cfg=cfg,
+            n_sweeps=n_iter,
+            Mb=Mb,
+            theta_p_method="svd",
+            rng=rng,  # type: ignore[arg-type]
+            beta=beta,
+            acceptance="posterior",
         )
     else:
         raise ValueError("update_scheme must be 'single' or 'red_black'.")
 
-    burn = _retained_start(len(states), burn_fraction)
-    retained = states[burn:]
-    fields = np.stack([state.G_accepted for state in retained])
+    burn = _retained_start(expected_updates, burn_fraction)
+    fields_retained: list[np.ndarray] = []
+    misfit_retained: list[float] = []
+    accepted: list[bool] = []
+    started = perf_counter()
+    for idx, state in enumerate(states):
+        accepted.append(state.accepted)
+        if idx >= burn:
+            fields_retained.append(state.G_accepted)
+            misfit_retained.append(-state.log_likelihood_accepted)
+    wall_seconds = perf_counter() - started
+    if len(accepted) != expected_updates:
+        raise RuntimeError("conditioned sampler yielded an unexpected update count.")
+
+    fields = np.stack(fields_retained)
     coefficients = _project_coefficients(fields, Phi, lam)
     return _ChainSamples(
         fields=fields,
-        misfit=-np.asarray(
-            [state.log_likelihood_accepted for state in retained], dtype=np.float64
-        ),
+        misfit=np.asarray(misfit_retained, dtype=np.float64),
         theta_norm=np.linalg.norm(coefficients, axis=1),
         coefficients=coefficients,
-        acceptance_rate=float(np.mean([state.accepted for state in states])),
+        acceptance_rate=float(np.mean(accepted)),
+        forward_solves=expected_updates + 2,
+        wall_seconds=wall_seconds,
     )
 
 
@@ -235,36 +263,44 @@ def _global_pcn_chain(
             cfg.nx,
         )
 
-    states = list(
-        metropolis_hastings(
-            log_density_fn=log_density,
-            proposal_fn=make_pcn_proposal(beta),
-            theta0=initial_scale
-            * rng.standard_normal(cfg.n_global_modes, dtype=np.float64),
-            n_iter=n_iter,
-            rng=rng,
-            log_prior_fn=log_prior,
-        )
+    states = metropolis_hastings(
+        log_density_fn=log_density,
+        proposal_fn=make_pcn_proposal(beta),
+        theta0=initial_scale
+        * rng.standard_normal(cfg.n_global_modes, dtype=np.float64),
+        n_iter=n_iter,
+        rng=rng,
+        log_prior_fn=log_prior,
     )
-    burn = _retained_start(len(states), burn_fraction)
-    retained = states[burn:]
-    coefficients = np.stack([state.theta for state in retained])
+    burn = _retained_start(n_iter, burn_fraction)
+    coefficient_retained: list[np.ndarray] = []
+    misfit_retained: list[float] = []
+    accepted: list[bool] = []
+    started = perf_counter()
+    for idx, state in enumerate(states):
+        accepted.append(state.accepted)
+        if idx >= burn:
+            coefficient_retained.append(state.theta)
+            misfit_retained.append(-(state.log_density - log_prior(state.theta)))
+    wall_seconds = perf_counter() - started
+    if len(accepted) != n_iter:
+        raise RuntimeError("global pCN sampler yielded an unexpected update count.")
+
+    coefficients = np.stack(coefficient_retained)
     fields = np.stack(
         [
             reshape_field(field_from_theta(Phi, lam, theta), cfg.ny, cfg.nx)
             for theta in coefficients
         ]
     )
-    misfit = -np.asarray(
-        [state.log_density - log_prior(state.theta) for state in retained],
-        dtype=np.float64,
-    )
     return _ChainSamples(
         fields=fields,
-        misfit=misfit,
+        misfit=np.asarray(misfit_retained, dtype=np.float64),
         theta_norm=np.linalg.norm(coefficients, axis=1),
         coefficients=coefficients,
-        acceptance_rate=float(np.mean([state.accepted for state in states])),
+        acceptance_rate=float(np.mean(accepted)),
+        forward_solves=n_iter + 1,
+        wall_seconds=wall_seconds,
     )
 
 
@@ -298,13 +334,28 @@ def _summarize_scheme(
         )
         for idx in range(n_coefficients)
     )
+    scalar_summaries_tuple = tuple(scalar_summaries)
+    conservative_total_ess = min(
+        summary.total_ess for summary in scalar_summaries_tuple
+    )
+    total_forward_solves = sum(chain.forward_solves for chain in chains)
+    wall_seconds = sum(chain.wall_seconds for chain in chains)
+    ess_per_1000_solves, ess_per_second = sampling_efficiency(
+        conservative_total_ess, total_forward_solves, wall_seconds
+    )
     return SchemeSummary(
         label=label,
         relative_k_error=relative_error(k_from_mean_G, truth.k_true),
         coverage=credible_interval_coverage(fields, truth.G_true, level=level),
         acceptance_rate=float(np.mean([chain.acceptance_rate for chain in chains])),
         n_retained_per_chain=chains[0].fields.shape[0],
-        scalar_summaries=tuple(scalar_summaries),
+        total_forward_solves=total_forward_solves,
+        wall_seconds=wall_seconds,
+        conservative_total_ess=conservative_total_ess,
+        max_r_hat=max(summary.r_hat for summary in scalar_summaries_tuple),
+        ess_per_1000_solves=ess_per_1000_solves,
+        ess_per_second=ess_per_second,
+        scalar_summaries=scalar_summaries_tuple,
     )
 
 
@@ -328,32 +379,54 @@ def _print_summaries(summaries: Sequence[SchemeSummary], level: float) -> None:
     print(f"central credible-interval level: {level:.2f}")
 
 
-def _verdict(red_black: SchemeSummary, baseline: SchemeSummary, level: float) -> str:
-    red_black_rhat = max(item.r_hat for item in red_black.scalar_summaries)
-    baseline_rhat = max(item.r_hat for item in baseline.scalar_summaries)
-    if red_black_rhat > 1.05 or baseline_rhat > 1.05:
+def _print_compute_fair_table(summaries: Sequence[SchemeSummary]) -> None:
+    print(
+        "scheme              rel-k(mean G) coverage max_Rhat min_total_ESS "
+        "forward_solves wall_seconds ESS/1k_solves ESS/second"
+    )
+    for summary in summaries:
+        print(
+            f"{summary.label:<19} {summary.relative_k_error:13.4e} "
+            f"{summary.coverage:8.3f} {summary.max_r_hat:8.3f} "
+            f"{summary.conservative_total_ess:13.2f} "
+            f"{summary.total_forward_solves:14d} {summary.wall_seconds:12.2f} "
+            f"{summary.ess_per_1000_solves:13.3f} "
+            f"{summary.ess_per_second:10.3f}"
+        )
+    print(
+        "Compute normalization uses the minimum total ESS across reported "
+        "scalars and counts actual scheme-local forward solves, including "
+        "initialization. Wall time includes scheme-local setup."
+    )
+
+
+def _verdict(summaries: Sequence[SchemeSummary], level: float) -> str:
+    single, red_black, baseline = summaries
+    if any(summary.max_r_hat > 1.05 for summary in summaries):
         return (
-            "INCONCLUSIVE: at least one red-black or baseline R_hat exceeds "
-            "1.05. Run longer chains before attributing the residual error."
+            "INCONCLUSIVE: at least one scheme has R_hat above 1.05. The "
+            "compute-normalized table is diagnostic only until longer chains "
+            "converge; route (b) remains justified for investigation, not yet "
+            "as a proven fix."
         )
     coverage_near_nominal = (
         abs(red_black.coverage - level) <= 0.1 and abs(baseline.coverage - level) <= 0.1
     )
-    baseline_similar = (
-        abs(red_black.relative_k_error - baseline.relative_k_error) <= 0.1
-    )
+    conditioned_best = min(single.relative_k_error, red_black.relative_k_error)
+    baseline_similar = abs(conditioned_best - baseline.relative_k_error) <= 0.1
     if coverage_near_nominal and baseline_similar:
         return (
-            "DATA-LIMITED: calibrated coverage and a similar global-pCN "
-            "baseline support genuine posterior uncertainty."
+            "DATA-LIMITED: converged calibrated coverage and similar recovery "
+            "support genuine posterior uncertainty. Use ESS per solve and per "
+            "second to judge conditioning's speed value."
         )
     if (
         red_black.coverage < level - 0.2
-        or baseline.relative_k_error + 0.1 < red_black.relative_k_error
+        or baseline.relative_k_error + 0.1 < conditioned_best
     ):
         return (
-            "DEFECT SIGNAL: red-black coverage or the global-pCN comparison "
-            "motivates route (b) or richer observations."
+            "DEFECT SIGNAL: converged conditioned recovery trails global pCN "
+            "materially or coverage is poor. Route (b) is justified."
         )
     return (
         "INCONCLUSIVE: the short run does not cleanly separate data-limited "
@@ -361,12 +434,46 @@ def _verdict(red_black: SchemeSummary, baseline: SchemeSummary, level: float) ->
     )
 
 
+def _resolved_lengths(args: argparse.Namespace) -> _RunLengths:
+    defaults = (
+        _RunLengths("long", 2_000, 100, 5_000)
+        if args.long
+        else _RunLengths("responsive", 200, 10, 500)
+    )
+    lengths = _RunLengths(
+        profile=defaults.profile,
+        single_iter=(
+            defaults.single_iter if args.single_iter is None else args.single_iter
+        ),
+        red_black_sweeps=(
+            defaults.red_black_sweeps
+            if args.red_black_sweeps is None
+            else args.red_black_sweeps
+        ),
+        global_iter=(
+            defaults.global_iter if args.global_iter is None else args.global_iter
+        ),
+    )
+    if (
+        lengths.single_iter < 1
+        or lengths.red_black_sweeps < 1
+        or lengths.global_iter < 1
+    ):
+        raise ValueError("all chain lengths must be positive.")
+    return lengths
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--long",
+        action="store_true",
+        help="Use the opt-in long convergence profile.",
+    )
     parser.add_argument("--n-chains", type=int, default=4)
-    parser.add_argument("--single-iter", type=int, default=200)
-    parser.add_argument("--red-black-sweeps", type=int, default=10)
-    parser.add_argument("--global-iter", type=int, default=500)
+    parser.add_argument("--single-iter", type=int, default=None)
+    parser.add_argument("--red-black-sweeps", type=int, default=None)
+    parser.add_argument("--global-iter", type=int, default=None)
     parser.add_argument("--mb", type=int, default=16)
     parser.add_argument("--beta", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=7)
@@ -379,6 +486,7 @@ def main() -> None:
         raise ValueError("n-chains must be at least 2 for R_hat.")
     if args.initial_scale <= 0.0:
         raise ValueError("initial-scale must be positive.")
+    lengths = _resolved_lengths(args)
 
     cfg = Config(seed=args.seed, beta=args.beta, n_chains=args.n_chains)
     truth, theta_true_draw, noise_draw = _truth_replay_prefix(cfg)
@@ -392,7 +500,7 @@ def main() -> None:
             noise_draw,
             chain_seed,
             "single",
-            args.single_iter,
+            lengths.single_iter,
             args.mb,
             args.beta,
             args.burn_fraction,
@@ -409,7 +517,7 @@ def main() -> None:
             noise_draw,
             chain_seed,
             "red_black",
-            args.red_black_sweeps,
+            lengths.red_black_sweeps,
             args.mb,
             args.beta,
             args.burn_fraction,
@@ -426,7 +534,7 @@ def main() -> None:
             Phi,
             lam,
             chain_seed + 1_000,
-            args.global_iter,
+            lengths.global_iter,
             args.beta,
             args.burn_fraction,
             args.initial_scale,
@@ -441,12 +549,14 @@ def main() -> None:
 
     print("M9 CONVERGENCE DIAGNOSTICS")
     print(
-        f"grid={cfg.ny} x {cfg.nx}; n_chains={args.n_chains}; Mb={args.mb}; "
-        f"beta={args.beta}; seed={args.seed}; initial_scale={args.initial_scale}"
+        f"profile={lengths.profile}; grid={cfg.ny} x {cfg.nx}; "
+        f"n_chains={args.n_chains}; Mb={args.mb}; beta={args.beta}; "
+        f"seed={args.seed}; initial_scale={args.initial_scale}"
     )
     print(
-        f"single_iter={args.single_iter}; red_black_sweeps={args.red_black_sweeps}; "
-        f"global_iter={args.global_iter}; burn_fraction={args.burn_fraction:.3f}"
+        f"single_iter={lengths.single_iter}; "
+        f"red_black_sweeps={lengths.red_black_sweeps}; "
+        f"global_iter={lengths.global_iter}; burn_fraction={args.burn_fraction:.3f}"
     )
     print(
         "Conditioned-chain setup: one shared synthetic truth is replayed before "
@@ -455,8 +565,11 @@ def main() -> None:
     print()
     _print_summaries(summaries, args.coverage_level)
     print()
+    print("COMPUTE-FAIR COMPARISON")
+    _print_compute_fair_table(summaries)
+    print()
     print("Verdict:")
-    print(f"  {_verdict(summaries[1], summaries[2], args.coverage_level)}")
+    print(f"  {_verdict(summaries, args.coverage_level)}")
     print(
         "  Use longer chains before making a recovery claim when R_hat or ESS "
         "shows that the responsive default run is not converged."
