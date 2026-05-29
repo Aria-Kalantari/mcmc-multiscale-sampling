@@ -202,9 +202,12 @@
   comparison: LU, SVD, LU-stabilized, c=0 SVD, and soft rows at `rho=1e1` and
   `rho=1e3`. The full headless sweep remains
   `python -m experiments.exp05_stability_fixes`.
-- Dashboard limitations: M6 is a batch-run viewer rather than a pause/resume
-  live streaming controller; it covers the existing single-subdomain M4/M5
-  sampler modes only; large iteration counts can take noticeably longer.
+- The dashboard now has an `Update scheme` control for `single` and
+  `red_black`; red-black runs through the shared Streamlit-free helper and
+  defaults to stable SVD hard conditioning.
+- Dashboard limitations: the app is a batch-run viewer rather than a
+  pause/resume live streaming controller; large iteration counts or many
+  red-black sweeps can take noticeably longer.
 
 ## M7 Implementation
 
@@ -245,5 +248,8 @@
   `1.5359e-15 / 8.4514e-15`, accepted interface-jump mean `2.9789e-01`,
   candidate theta-norm mean/max `6.0086 / 7.1052`, expected Gaussian norm
   `6.7456`, and max candidate norm / expected norm `1.0533`.
+- The dashboard exposes red-black through the same scheduling code via an
+  `Update scheme` selectbox. In the UI, red-black uses `n_sweeps` rather than
+  `n_iter` and starts from the stable SVD hard-conditioning defaults.
 - Final public-release notes: the repository contains synthetic examples only,
   no private data, and no tool-instruction files.

@@ -44,8 +44,9 @@ python -m experiments.exp06_red_black_updates
 python -m streamlit run app/streamlit_app.py
 ```
 
-The dashboard visualizes the single-subdomain sampler, LU/SVD stability
-comparisons, and a compact M5 stability-fix comparison.
+The dashboard visualizes the single-subdomain sampler, red-black sweeps via an
+`Update scheme` control, LU/SVD stability comparisons, and a compact M5
+stability-fix comparison. Red-black defaults to stable SVD hard conditioning.
 
 ## Repository Structure
 
