@@ -5,24 +5,6 @@
 
 ---
 
-## 0. How to use this spec (read first — instructions for the coding agent)
-
-You are implementing a research code from scratch in **Python**. This document is the contract. Follow it section by section. Where it says **PORT**, reproduce the MATLAB reference exactly and prove numerical parity. Where it says **NEW**, you are building something the reference does not contain.
-
-Ground rules:
-
-1. **There is a validated MATLAB reference** at `reference/matlab/local_conditioning_project.m`. It implements only the *static* local-conditioning core and it produced good, trusted results. **Read it before writing the conditioning, KLE, grid, or subdomain code.** Your Python versions of those pieces must match it numerically (see §11 parity tests). Do **not** "improve" the math during the port — port first, prove parity, then extend.
-2. **Everything ships in Python.** The MATLAB file is reference-only; never call MATLAB at runtime.
-3. **Build in the phased order of §10.** Do not start the Streamlit app before the sampler runs headless and passes tests.
-4. **Scientific code must be verified, not just run.** Every numerical module needs a test with a known answer or a parity check (§11). A module without a passing test is not done.
-5. **Never silently change precision.** Use float64 everywhere. (The MATLAB work hit a bug where single precision crept in and the constraint residual was ~1e-6 instead of ~1e-16.)
-6. When something here is marked **[CONFIRM]**, it is a modeling choice not fully pinned down by the source material; implement the stated default behind a config flag and leave a `# CONFIRM:` comment so it is easy to change once Aidan/Dr. Pereira clarify.
-7. Keep a running `NOTES.md` of decisions and any deviation from this spec.
-
-Agent conventions: if you are **Codex**, also create an `AGENTS.md`; if you are **Claude Code**, also create a `CLAUDE.md`. Put the §13 conventions and the §11 test commands in it.
-
----
-
 ## 1. What this project is (domain primer)
 
 We are solving a **Bayesian inverse problem** for subsurface (Darcy) flow. The unknown is a spatially varying **log-permeability field** $G(x)=\log k(x)$, modeled as a Gaussian random field and represented by a truncated **Karhunen–Loève expansion (KLE)**. Given pressure measurements, we want the posterior distribution over $G$ (equivalently over the KLE coefficients $\theta$).
@@ -171,7 +153,6 @@ Repository layout:
 ├─ SPEC.md                     # this file
 ├─ NOTES.md                    # agent's running decision log (create it)
 ├─ pyproject.toml / requirements.txt
-├─ reference/matlab/local_conditioning_project.m   # validated reference (read-only)
 ├─ src/mcmc_multiscale/
 │  ├─ config.py        grid.py        covariance.py   kle.py        field.py
 │  ├─ subdomain.py     observations.py               bayes.py

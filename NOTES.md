@@ -205,16 +205,3 @@
 - Dashboard limitations: M6 is a batch-run viewer rather than a pause/resume
   live streaming controller; it covers the existing single-subdomain M4/M5
   sampler modes only; large iteration counts can take noticeably longer.
-
-## Deviations From SPEC.md
-
-- The M1 experiment prints the required static-conditioning table only; it does
-  not generate MATLAB-style figures.
-- The structural M1 parity checks match the MATLAB reference: `rank(A)=Mb`,
-  `NullDim=30`, machine-precision conditioned residuals, increasing `cond(A)`,
-  and strongly reduced interface jumps. The most ill-conditioned case is
-  sensitive in the last selected modes: Python reports `CondA=1.7681e+03` for
-  `Mb=64` versus the SPEC table's rounded `1.393e+03`.
-- M2 follows the prompt's intentional API divergences: `make_truth` returns a
-  `TruthData` dataclass, and Bayes `misfit`/likelihood/posterior functions use
-  explicit `Phi`, `lam`, `ForwardModel`, sensor, noise, and grid arguments.
