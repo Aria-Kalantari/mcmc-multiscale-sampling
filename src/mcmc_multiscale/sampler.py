@@ -34,7 +34,12 @@ from mcmc_multiscale.forward import ForwardModel
 from mcmc_multiscale.grid import cell_centered_grid
 from mcmc_multiscale.kle import top_eigenpairs
 from mcmc_multiscale.observations import make_truth, restrict_pressure
-from mcmc_multiscale.subdomain import make_subdomain
+from mcmc_multiscale.subdomain import (
+    Subdomain,
+    make_subdomain,
+    make_subdomain_at,
+    red_black_order,
+)
 
 
 @dataclass(frozen=True)
@@ -76,6 +81,43 @@ class ConditionedSamplerState:
 
     cond_A: float
     cond_B: float | None
+
+
+@dataclass(frozen=True)
+class RedBlackSamplerState:
+    """One local update from the sequential red-black sweep schedule."""
+
+    sweep: int
+    color: int
+    subdomain_row: int
+    subdomain_col: int
+    accepted: bool
+    acceptance_probability: float
+    theta_norm_candidate: float
+    theta_norm_accepted: float
+    expected_norm: float
+    constraint_residual_candidate: float
+    interface_jump_candidate: float
+    interface_jump_accepted: float
+    relative_k_error_accepted: float | None
+    log_likelihood_accepted: float
+    G_accepted: np.ndarray
+    G_candidate: np.ndarray
+    cond_A: float
+    cond_B: float | None
+    hidden_null_norm: float
+
+
+@dataclass(frozen=True)
+class _LocalUpdateData:
+    row: int
+    col: int
+    color: int
+    sub: Subdomain
+    Phi_ext: np.ndarray
+    lambda_local: np.ndarray
+    A: np.ndarray
+    cond_local_idx: np.ndarray
 
 
 def _pressure_log_likelihood(
@@ -142,6 +184,108 @@ def _particular_solution(
     raise ValueError("theta_p_method must be 'lu', 'svd', or 'lu_stabilized'.")
 
 
+def _validate_conditioning_options(
+    theta_p_method: str,
+    conditioning_mode: str,
+    rhs_mode: str,
+    rho: float | None,
+) -> None:
+    if rhs_mode not in {"data", "zero"}:
+        raise ValueError("rhs_mode must be 'data' or 'zero'.")
+    if conditioning_mode not in {"hard", "soft"}:
+        raise ValueError("conditioning_mode must be 'hard' or 'soft'.")
+    allowed_theta_methods = {"lu", "svd", "lu_stabilized"}
+    if conditioning_mode == "soft":
+        allowed_theta_methods = allowed_theta_methods | {"soft"}
+    if theta_p_method not in allowed_theta_methods:
+        raise ValueError(
+            "theta_p_method must be 'lu', 'svd', or 'lu_stabilized'"
+            + (
+                " (or 'soft' for soft conditioning)."
+                if conditioning_mode == "soft"
+                else "."
+            )
+        )
+    if conditioning_mode == "soft":
+        if rho is None or not np.isfinite(float(rho)) or float(rho) <= 0.0:
+            raise ValueError("soft conditioning requires rho > 0.")
+    elif rho is not None and (not np.isfinite(float(rho)) or float(rho) <= 0.0):
+        raise ValueError("rho must be positive when provided.")
+
+
+def _solve_local_conditioning(
+    A: np.ndarray,
+    c_used: np.ndarray,
+    Next: int,
+    theta_p_method: str,
+    conditioning_mode: str,
+    rhs_mode: str,
+) -> tuple[np.ndarray, np.ndarray, float, float | None]:
+    if conditioning_mode == "hard" and rhs_mode == "zero":
+        theta_p = np.zeros(Next, dtype=np.float64)
+        _, Z, _, cond_A, _ = _particular_solution(A, c_used, "svd")
+        return theta_p, Z, cond_A, None
+    if conditioning_mode == "hard":
+        theta_p, Z, _, cond_A, cond_B = _particular_solution(A, c_used, theta_p_method)
+        return theta_p, Z, cond_A, cond_B
+
+    _, Z, _, cond_A, _ = _particular_solution(A, c_used, "svd")
+    return np.zeros(Next, dtype=np.float64), Z, cond_A, None
+
+
+def _condition_candidate(
+    theta_proposed: np.ndarray,
+    A: np.ndarray,
+    c_used: np.ndarray,
+    theta_p: np.ndarray,
+    Z: np.ndarray,
+    conditioning_mode: str,
+    rhs_mode: str,
+    rho: float | None,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    if conditioning_mode == "soft":
+        theta_local_candidate = soft_project(theta_proposed, A, c_used, float(rho))
+        return theta_local_candidate, theta_local_candidate.copy(), np.nan
+
+    theta_n_candidate = project_null(Z, theta_proposed)
+    hidden_null_norm = 0.0 if rhs_mode == "zero" else theta_norm(Z.T @ theta_p)
+    return theta_p + theta_n_candidate, theta_n_candidate, hidden_null_norm
+
+
+def _precompute_red_black_updates(
+    cfg: Config,
+    Mb: int,
+    global_pts: np.ndarray,
+) -> list[_LocalUpdateData]:
+    Next = cfg.Nc + Mb
+    order = red_black_order(cfg)
+    local_data: list[_LocalUpdateData] = []
+    for color in (0, 1):
+        for row, col in order[color]:
+            sub = make_subdomain_at(cfg, row, col)
+            local_pts = global_pts[sub.local_global_idx, :]
+            C_local = exp_covariance(local_pts, cfg.sigma, cfg.corr_length)
+            Phi_local, lambda_local = top_eigenpairs(C_local, Next)
+            cond_local_idx = select_conditioning_points(
+                local_pts, sub.core_local_idx, sub.buffer_local_idx, Mb
+            )
+            Phi_ext = Phi_local[:, :Next]
+            A = build_A(Phi_ext, np.sqrt(lambda_local), cond_local_idx)
+            local_data.append(
+                _LocalUpdateData(
+                    row=row,
+                    col=col,
+                    color=color,
+                    sub=sub,
+                    Phi_ext=Phi_ext,
+                    lambda_local=lambda_local,
+                    A=A,
+                    cond_local_idx=cond_local_idx,
+                )
+            )
+    return local_data
+
+
 def conditioned_sampler(
     cfg: Config,
     n_iter: int,
@@ -166,27 +310,7 @@ def conditioned_sampler(
         raise ValueError("n_iter must be at least 1.")
     if update_scheme != "single":
         raise NotImplementedError("M4 implements only update_scheme='single'.")
-    if rhs_mode not in {"data", "zero"}:
-        raise ValueError("rhs_mode must be 'data' or 'zero'.")
-    if conditioning_mode not in {"hard", "soft"}:
-        raise ValueError("conditioning_mode must be 'hard' or 'soft'.")
-    allowed_theta_methods = {"lu", "svd", "lu_stabilized"}
-    if conditioning_mode == "soft":
-        allowed_theta_methods = allowed_theta_methods | {"soft"}
-    if theta_p_method not in allowed_theta_methods:
-        raise ValueError(
-            "theta_p_method must be 'lu', 'svd', or 'lu_stabilized'"
-            + (
-                " (or 'soft' for soft conditioning)."
-                if conditioning_mode == "soft"
-                else "."
-            )
-        )
-    if conditioning_mode == "soft":
-        if rho is None or not np.isfinite(float(rho)) or float(rho) <= 0.0:
-            raise ValueError("soft conditioning requires rho > 0.")
-    elif rho is not None and (not np.isfinite(float(rho)) or float(rho) <= 0.0):
-        raise ValueError("rho must be positive when provided.")
+    _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
@@ -223,32 +347,25 @@ def conditioned_sampler(
         accepted_vec = G_accepted.ravel(order="F")
         c_data = build_c(accepted_vec, sub.local_global_idx, cond_local_idx)
         c_used = np.zeros_like(c_data) if rhs_mode == "zero" else c_data
-        Z = null_basis(A)
-
-        if conditioning_mode == "hard" and rhs_mode == "zero":
-            theta_p = np.zeros(Next, dtype=np.float64)
-            _, _, _, cond_A, _ = _particular_solution(A, c_used, "svd")
-            cond_B = None
-        elif conditioning_mode == "hard":
-            theta_p, Z, _, cond_A, cond_B = _particular_solution(
-                A, c_used, theta_p_method
-            )
-        else:
-            _, _, _, cond_A, _ = _particular_solution(A, c_used, "svd")
-            cond_B = None
-            theta_p = np.zeros(Next, dtype=np.float64)
+        theta_p, Z, cond_A, cond_B = _solve_local_conditioning(
+            A, c_used, Next, theta_p_method, conditioning_mode, rhs_mode
+        )
 
         theta_proposed = _proposal_from_current(
             theta_local_accepted, beta_value, proposal, rng
         )
-        if conditioning_mode == "soft":
-            theta_local_candidate = soft_project(theta_proposed, A, c_used, float(rho))
-            theta_n_candidate = theta_local_candidate.copy()
-            hidden_null_norm = np.nan
-        else:
-            theta_n_candidate = project_null(Z, theta_proposed)
-            theta_local_candidate = theta_p + theta_n_candidate
-            hidden_null_norm = 0.0 if rhs_mode == "zero" else theta_norm(Z.T @ theta_p)
+        theta_local_candidate, theta_n_candidate, hidden_null_norm = (
+            _condition_candidate(
+                theta_proposed,
+                A,
+                c_used,
+                theta_p,
+                Z,
+                conditioning_mode,
+                rhs_mode,
+                rho,
+            )
+        )
 
         G_local_candidate = field_from_theta(
             Phi_ext, lambda_local, theta_local_candidate
@@ -313,3 +430,142 @@ def conditioned_sampler(
             cond_A=float(cond_A),
             cond_B=None if cond_B is None else float(cond_B),
         )
+
+
+def red_black_conditioned_sampler(
+    cfg: Config,
+    n_sweeps: int,
+    Mb: int,
+    theta_p_method: str,
+    rng: np.random.Generator,
+    beta: float | None = None,
+    proposal: str = "pcn",
+    rhs_mode: str = "data",
+    conditioning_mode: str = "hard",
+    rho: float | None = None,
+) -> Iterator[RedBlackSamplerState]:
+    """Run deterministic sequential red-black sweeps over all coarse subdomains.
+
+    Coarse coordinates in yielded states are zero-based. Each color pass builds
+    all conditioning right-hand sides from one frozen global field snapshot,
+    then applies same-color local updates sequentially in sorted row/column
+    order.
+    """
+
+    if n_sweeps < 1:
+        raise ValueError("n_sweeps must be at least 1.")
+    _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
+    beta_value = cfg.beta if beta is None else float(beta)
+
+    truth = make_truth(cfg, rng)
+    _, _, _, _, global_pts = cell_centered_grid(cfg.nx, cfg.ny)
+    C_global = exp_covariance(global_pts, cfg.sigma, cfg.corr_length)
+    Phi_global, lambda_global = top_eigenpairs(C_global, cfg.n_global_modes)
+
+    theta_global_current = rng.standard_normal(cfg.n_global_modes, dtype=np.float64)
+    G_current_vec = field_from_theta(Phi_global, lambda_global, theta_global_current)
+    G_accepted = reshape_field(G_current_vec, cfg.ny, cfg.nx)
+    k_accepted = permeability_from_log_field(G_accepted)
+    fwd = ForwardModel(cfg)
+    pressure_accepted = fwd.solve(k_accepted)
+    log_like_accepted = _pressure_log_likelihood(
+        pressure_accepted, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
+    )
+
+    local_updates = _precompute_red_black_updates(cfg, Mb, global_pts)
+    local_by_color: dict[int, list[_LocalUpdateData]] = {
+        0: [data for data in local_updates if data.color == 0],
+        1: [data for data in local_updates if data.color == 1],
+    }
+    Next = cfg.Nc + Mb
+    theta_local_by_subdomain = {
+        (data.row, data.col): rng.standard_normal(Next, dtype=np.float64)
+        for data in local_updates
+    }
+    expected_norm = expected_gaussian_norm(Next)
+
+    for sweep in range(1, n_sweeps + 1):
+        for color in (0, 1):
+            frozen_for_color = G_accepted.copy()
+            frozen_vec = frozen_for_color.ravel(order="F")
+
+            for data in local_by_color[color]:
+                key = (data.row, data.col)
+                c_data = build_c(
+                    frozen_vec, data.sub.local_global_idx, data.cond_local_idx
+                )
+                c_used = np.zeros_like(c_data) if rhs_mode == "zero" else c_data
+                theta_p, Z, cond_A, cond_B = _solve_local_conditioning(
+                    data.A,
+                    c_used,
+                    Next,
+                    theta_p_method,
+                    conditioning_mode,
+                    rhs_mode,
+                )
+
+                theta_local_current = theta_local_by_subdomain[key]
+                theta_proposed = _proposal_from_current(
+                    theta_local_current, beta_value, proposal, rng
+                )
+                theta_local_candidate, _, hidden_null_norm = _condition_candidate(
+                    theta_proposed,
+                    data.A,
+                    c_used,
+                    theta_p,
+                    Z,
+                    conditioning_mode,
+                    rhs_mode,
+                    rho,
+                )
+
+                G_local_candidate = field_from_theta(
+                    data.Phi_ext, data.lambda_local, theta_local_candidate
+                )
+                accepted_vec = G_accepted.ravel(order="F")
+                candidate_vec = accepted_vec.copy()
+                candidate_vec[data.sub.core_global_idx] = G_local_candidate[
+                    data.sub.core_local_idx
+                ]
+                G_candidate = reshape_field(candidate_vec, cfg.ny, cfg.nx)
+                k_candidate = permeability_from_log_field(G_candidate)
+                pressure_candidate = fwd.solve(k_candidate)
+                log_like_candidate = _pressure_log_likelihood(
+                    pressure_candidate, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
+                )
+
+                log_alpha = log_like_candidate - log_like_accepted
+                accept_prob = _acceptance_probability(log_alpha)
+                accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
+
+                if accepted:
+                    G_accepted = G_candidate.copy()
+                    k_accepted = k_candidate.copy()
+                    pressure_accepted = pressure_candidate.copy()
+                    log_like_accepted = log_like_candidate
+                    theta_local_by_subdomain[key] = theta_local_candidate.copy()
+
+                theta_local_accepted = theta_local_by_subdomain[key]
+                yield RedBlackSamplerState(
+                    sweep=sweep,
+                    color=color,
+                    subdomain_row=data.row,
+                    subdomain_col=data.col,
+                    accepted=accepted,
+                    acceptance_probability=accept_prob,
+                    theta_norm_candidate=theta_norm(theta_local_candidate),
+                    theta_norm_accepted=theta_norm(theta_local_accepted),
+                    expected_norm=expected_norm,
+                    constraint_residual_candidate=constraint_residual(
+                        data.A, theta_local_candidate, c_used
+                    ),
+                    interface_jump_candidate=interface_jump(G_candidate, data.sub),
+                    interface_jump_accepted=interface_jump(G_accepted, data.sub),
+                    relative_k_error_accepted=relative_error(k_accepted, truth.k_true),
+                    log_likelihood_accepted=float(log_like_accepted),
+                    G_accepted=G_accepted.copy(),
+                    G_candidate=G_candidate.copy(),
+                    cond_A=float(cond_A),
+                    cond_B=None if cond_B is None else float(cond_B),
+                    hidden_null_norm=hidden_null_norm,
+                )
