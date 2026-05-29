@@ -15,7 +15,7 @@
 
 - TPFA solves `-div(k grad p) = f` on the cell-centered unit-square grid with
   harmonic internal-face permeability averages.
-- # CONFIRM: The default pressure boundary convention is Dirichlet `p=1` on
+- # The default pressure boundary convention is Dirichlet `p=1` on
   the left boundary, Dirichlet `p=0` on the right boundary, and homogeneous
   no-flow Neumann on the top and bottom. The default source is `f=0`.
 - Dirichlet boundaries use half-cell transmissibilities. For constant
@@ -27,7 +27,7 @@
   no-flow conditions. L2 errors for `16 x 16`, `32 x 32`, and `64 x 64` grids
   were `4.148090e-04`, `1.036890e-04`, and `2.592169e-05`, respectively,
   showing approximately second-order refinement behavior.
-- # CONFIRM: The default pressure observation layout is a regular
+- # The default pressure observation layout is a regular
   `n_obs_x x n_obs_y` grid of cell-centered sensors, defaulting to `8 x 8`,
   with Gaussian noise standard deviation `sigma_obs=0.01`.
 - The M2 sanity run measured noiseless synthetic-truth misfit
