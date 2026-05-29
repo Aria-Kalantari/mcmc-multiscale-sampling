@@ -1,5 +1,7 @@
 numpy>=1.26
 scipy>=1.11
+matplotlib>=3.8
+streamlit>=1.33
 pytest>=7.4
 ruff>=0.4
 black>=24.0
