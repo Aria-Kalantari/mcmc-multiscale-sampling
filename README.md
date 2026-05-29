@@ -1,8 +1,9 @@
 # MCMC Multiscale Sampling with Overlapping Subdomains
 
 This repository is a from-scratch Python research implementation. The current
-state implements **Phase 1 / M1 only**: the static local-conditioning core ported
-from `reference/matlab/local_conditioning_project.m`.
+state implements **M1 + M2**: the static local-conditioning core ported from
+`reference/matlab/local_conditioning_project.m`, plus the TPFA forward solver
+and basic Bayesian observation/misfit utilities.
 
 Implemented now:
 
@@ -14,13 +15,19 @@ Implemented now:
 - hard conditioning constraints
 - SVD minimum-norm particular solution and null-space basis
 - static conditioning experiment `exp01`
+- sparse TPFA Darcy pressure solver
+- synthetic pressure observations
+- prior, likelihood/misfit, and posterior helpers
 
-Not implemented yet: TPFA, observations, Bayes, MCMC, sampler integration,
-diagnostics, soft constraints, Streamlit, or Phase 2 generalization.
+Not implemented yet: MCMC, pCN proposals, sampler integration, diagnostics,
+soft constraints, Streamlit, or Phase 2 generalization.
 
 ## Run
 
 ```bash
 python -m pytest
 python -m experiments.exp01_static_conditioning
+python -m experiments.exp02_forward_bayes_sanity
+python -m ruff check .
+python -m black --check .
 ```
