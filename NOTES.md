@@ -253,3 +253,50 @@
   `n_iter` and starts from the stable SVD hard-conditioning defaults.
 - Final public-release notes: the repository contains synthetic examples only,
   no private data, and no tool-instruction files.
+
+## M8 Implementation
+
+- `Config.acceptance` defaults to `"posterior"`. The low-level conditioned
+  sampler functions retain `acceptance="likelihood_only"` as their
+  compatibility default so the M4/M5/M7 reproduction experiments continue to
+  emit their v1 results unchanged. New posterior runs pass
+  `acceptance="posterior"` explicitly.
+- The global field prior projects the current log field onto the global KLE:
+  `theta_global = (Phi.T @ G_vec) / sqrt(lam)` and
+  `log_prior_field = -0.5 ||theta_global||^2`, omitting additive constants.
+- For hard-conditioning pCN, the implemented M8 acceptance ratio is
+  `log_alpha = delta_log_like + delta_log_prior_field`
+  `+ 0.5 (||eta_candidate||^2 - ||eta_current||^2)`.
+  The last term is `log q(reverse) - log q(forward)` under the same convention
+  used by the M3 engine. Its positive sign follows from pCN reversibility with
+  respect to the standard-normal local null coordinates. In the fixed-
+  constraint Gaussian special case, it cancels the corresponding prior
+  difference and reduces exactly to likelihood-only acceptance.
+- This ratio follows the posterior-correct MCMC acceptance convention
+  cross-referenced in the project specification to the JCP 2024 multiscale
+  sampling paper by Ali, Al-Mamun, Pereira, and Rahunanthan.
+- The hard-pCN correction is active for both single-subdomain and red-black
+  samplers. Random-walk mode remains symmetric. Soft conditioning currently
+  uses zero proposal correction because the transformed soft proposal
+  asymmetry has not been derived; M8 recovery comparisons use hard SVD.
+- `acceptance="likelihood_only"` remains available unchanged for the M4/M5
+  instability story. Its ratio remains exactly
+  `log_like_candidate - log_like_current`.
+- `experiments/exp07_posterior_recovery.py` compares posterior and
+  likelihood-only paths for single-subdomain and red-black hard-SVD runs.
+- The projected global-prior route in SPEC section 3.8(a) is stable but does
+  not yet deliver the requested decisive recovery in short default chains.
+  This is reported honestly rather than tuned away. The constraint-manifold
+  route in SPEC section 3.8(b) remains the leading follow-up.
+- The default observed run `python -m experiments.exp07_posterior_recovery`
+  used `Mb=16`, `beta=0.2`, `300` single-subdomain iterations, and `100`
+  red-black sweeps. For single-subdomain updates, posterior and
+  likelihood-only posterior-mean relative-k errors were `7.8980e-01` and
+  `7.8906e-01`; max candidate norms divided by expected norm were `1.8658`
+  and `1.8390`. For red-black updates, posterior and likelihood-only errors
+  were `7.0699e-01` and `7.5084e-01`; max candidate-norm ratios were `2.0754`
+  and `1.5326`, with acceptance rates `0.334` and `0.407`.
+- The same default red-black posterior run reduced accepted data misfit from
+  `6946.9509` to `90.9740`, above the nominal observation-noise floor `32`.
+  The projected global-prior baseline therefore improves the red-black path
+  without satisfying the stronger recovery target by itself.
