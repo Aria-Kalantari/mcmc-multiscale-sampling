@@ -1,4 +1,4 @@
-"""Configuration for the Phase 1 static-conditioning core."""
+"""Configuration for the M1/M2 research core."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Config:
-    """Single source of Phase 1 numerical parameters.
+    """Single source of M1/M2 numerical parameters.
 
     `target_row` and `target_col` intentionally follow the MATLAB convention:
     they are one-based coarse-subdomain identifiers, not zero-based Python
@@ -28,3 +28,8 @@ class Config:
     Mb_list: tuple[int, ...] = (1, 2, 4, 8, 16, 32, 64)
     n_samples: int = 100
     seed: int = 7
+    sigma_obs: float = 0.01
+    n_obs_x: int = 8
+    n_obs_y: int = 8
+    left_pressure: float = 1.0
+    right_pressure: float = 0.0
