@@ -35,3 +35,4 @@ class Config:
     right_pressure: float = 0.0
     beta: float = 0.2
     acceptance: str = "posterior"
+    n_chains: int = 4

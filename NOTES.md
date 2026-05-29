@@ -300,3 +300,47 @@
   `6946.9509` to `90.9740`, above the nominal observation-noise floor `32`.
   The projected global-prior baseline therefore improves the red-black path
   without satisfying the stronger recovery target by itself.
+
+## M9 Implementation
+
+- M9 is measurement-only. It adds no sampler, conditioning, forward-model, or
+  acceptance-ratio changes.
+- `integrated_autocorr_time` uses Geyer's initial-monotone truncation:
+  adjacent autocorrelation pairs are retained until the first non-positive
+  sum, and retained sums are monotonized downward before evaluating
+  `tau = 1 + 2 sum(rho_k)`. `effective_sample_size` reports `N / tau`.
+- `gelman_rubin` uses scalar chains with shape `(n_chains, n_samples)`,
+  between-chain variance `B`, within-chain variance `W`, and
+  `V_hat = ((n - 1) / n) W + B / n`. The target is `R_hat <= 1.05`.
+- `posterior_summary` returns per-cell field mean and sample standard
+  deviation. `credible_interval_coverage` reports the fraction of true
+  log-field cells inside a central posterior interval, defaulting to `90%`.
+- Default `Config.n_chains` is `4`.
+- M8 uses one generator for both synthetic-truth generation and subsequent
+  chain draws. For a valid same-posterior multi-chain comparison without
+  altering sampler code, `experiments/exp08_convergence_diagnostics.py` uses
+  an experiment-only replay adapter: each conditioned chain receives the same
+  truth/noise prefix, then delegates initialization and proposal draws to a
+  distinct seeded `numpy.random.Generator`. Initial coefficient draws are
+  scaled by `2.0` to provide over-dispersed starts.
+- The no-conditioning reference is a plain global pCN chain targeting the same
+  synthetic posterior through the existing M3 `metropolis_hastings` engine
+  and `bayes.log_posterior`.
+- The responsive default run
+  `python -m experiments.exp08_convergence_diagnostics` uses `4` chains,
+  `200` single-subdomain iterations, `10` red-black sweeps, `500` global-pCN
+  iterations, `Mb=16`, `beta=0.2`, and a one-third burn-in. Posterior-mean
+  relative-k errors were `8.6084e-01` for single-subdomain updates,
+  `8.4096e-01` for red-black, and `6.3215e-01` for plain global pCN. Central
+  `90%` log-field interval coverages were `0.871`, `0.863`, and `0.832`.
+- The responsive default is not converged: maximum reported `R_hat` values
+  were `160.721` for single-subdomain updates, `50.928` for red-black, and
+  `6.106` for plain global pCN; total scalar ESS values are correspondingly
+  low. The experiment therefore prints an `INCONCLUSIVE` verdict and asks for
+  longer chains before attributing the residual error.
+- The preliminary global-pCN relative-k error is materially lower than the
+  conditioned red-black value while coverage is in the same broad range.
+  That is not a converged proof of a conditioned-sampler defect, but it is
+  enough to justify investigating the constraint-manifold route in SPEC
+  section 3.8(b) alongside longer-chain validation. The current evidence does
+  not support claiming that the `~0.79` floor is purely data-limited.

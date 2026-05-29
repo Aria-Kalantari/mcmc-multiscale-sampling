@@ -37,6 +37,7 @@ python -m experiments.exp04_reproduce_instability
 python -m experiments.exp05_stability_fixes
 python -m experiments.exp06_red_black_updates
 python -m experiments.exp07_posterior_recovery
+python -m experiments.exp08_convergence_diagnostics
 ```
 
 ## Acceptance Modes
@@ -46,6 +47,11 @@ projected global-KLE field prior and the hard-null pCN proposal correction.
 The low-level conditioned samplers retain an explicit `likelihood_only` mode so
 the M4/M5 instability studies remain reproducible. `exp07_posterior_recovery`
 compares both modes for single-subdomain and red-black updates.
+
+`exp08_convergence_diagnostics` adds multi-chain convergence and recovery
+diagnostics: IAT, ESS, Gelman-Rubin R-hat, 90% log-field credible-interval
+coverage, and a plain global-pCN reference chain for the same synthetic
+posterior.
 
 ## Dashboard
 
