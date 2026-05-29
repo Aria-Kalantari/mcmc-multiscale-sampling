@@ -17,11 +17,13 @@ if str(SRC) not in sys.path:
 
 from mcmc_multiscale.app_core import (  # noqa: E402
     MethodRunConfig,
+    RedBlackRunSummary,
     RunSummary,
     default_m5_methods,
     run_lu_svd_comparison,
     run_method,
     run_methods,
+    run_red_black,
 )
 from mcmc_multiscale.config import Config  # noqa: E402
 from mcmc_multiscale.sampler import ConditionedSamplerState  # noqa: E402
@@ -239,6 +241,107 @@ def _show_m5_comparison(
     )
 
 
+def _show_red_black_run(summary: RedBlackRunSummary) -> None:
+    st.subheader("Red-Black Sweep Summary")
+    cols = st.columns(4)
+    cols[0].metric("Acceptance rate", f"{summary.acceptance_rate:.3f}")
+    cols[1].metric("Accepted", f"{summary.accepted_count} / {summary.total_updates}")
+    cols[2].metric(
+        "Max candidate / expected",
+        f"{summary.max_candidate_over_expected:.3f}",
+    )
+    cols[3].metric("Total local updates", f"{summary.total_updates}")
+
+    st.subheader("Coverage")
+    coverage_cols = st.columns(4)
+    coverage_cols[0].metric("Sweeps", f"{summary.n_sweeps}")
+    coverage_cols[1].metric("Color 0 subdomains", f"{summary.n_color0_subdomains}")
+    coverage_cols[2].metric("Color 1 subdomains", f"{summary.n_color1_subdomains}")
+    coverage_cols[3].metric(
+        "Coverage",
+        (
+            "complete"
+            if summary.both_colors_updated and summary.all_subdomains_updated
+            else "partial"
+        ),
+    )
+    st.caption(
+        "This is a deterministic sequential frozen-snapshot schedule. With "
+        "overlapping subdomains it is not a claim of exact same-color parallel "
+        "independence."
+    )
+
+    st.subheader("Field Heatmaps")
+    heat_cols = st.columns(2)
+    with heat_cols[0]:
+        _plot_heatmap(summary.final_G_accepted, "Final accepted log field G")
+    with heat_cols[1]:
+        _plot_heatmap(summary.final_G_candidate, "Final candidate log field G")
+
+    st.subheader("Trace Diagnostics")
+    _plot_lines(
+        [
+            ("candidate", summary.candidate_theta_norms),
+            ("accepted", summary.accepted_theta_norms),
+        ],
+        "Red-black theta norm by local update",
+        "norm",
+        expected_norm=summary.expected_norm,
+    )
+    _plot_lines(
+        [("candidate residual", summary.constraint_residuals)],
+        "Red-black constraint residual",
+        "relative residual",
+    )
+    _plot_lines(
+        [
+            ("candidate", summary.interface_jump_candidates),
+            ("accepted", summary.interface_jump_accepted),
+        ],
+        "Red-black interface jump",
+        "RMS jump",
+    )
+    _plot_lines(
+        [("accepted", summary.relative_k_errors_accepted)],
+        "Red-black accepted relative permeability error",
+        "relative error",
+    )
+
+    st.subheader("Final Red-Black Diagnostics")
+    diag_cols = st.columns(3)
+    diag_cols[0].metric(
+        "Constraint residual mean/max",
+        f"{summary.mean_residual:.3e} / {summary.max_residual:.3e}",
+    )
+    diag_cols[1].metric(
+        "Mean accepted interface jump",
+        f"{summary.mean_interface_jump_accepted:.3e}",
+    )
+    diag_cols[2].metric(
+        "Final relative k error",
+        _fmt_optional(summary.final_relative_k_error_accepted),
+    )
+
+    st.dataframe(
+        [
+            {
+                "n_sweeps": summary.n_sweeps,
+                "total_updates": summary.total_updates,
+                "acceptance_rate": summary.acceptance_rate,
+                "max_candidate_over_expected": summary.max_candidate_over_expected,
+                "mean_residual": summary.mean_residual,
+                "max_residual": summary.max_residual,
+                "mean_interface_jump_accepted": summary.mean_interface_jump_accepted,
+                "final_relative_k_error_accepted": summary.final_relative_k_error_accepted,
+                "both_colors_updated": summary.both_colors_updated,
+                "all_subdomains_updated": summary.all_subdomains_updated,
+            }
+        ],
+        hide_index=True,
+        use_container_width=True,
+    )
+
+
 def _run_dashboard() -> None:
     st.set_page_config(
         page_title="MCMC Multiscale Conditioning Dashboard",
@@ -254,19 +357,40 @@ def _run_dashboard() -> None:
     base_cfg = Config()
     with st.sidebar:
         st.header("Controls")
-        Mb = st.selectbox("Mb", options=list(base_cfg.Mb_list), index=4)
-        n_iter = st.number_input(
-            "n_iter", min_value=1, max_value=1000, value=100, step=10
+        update_scheme = st.selectbox(
+            "Update scheme", options=["single", "red_black"], index=0
         )
+        Mb = st.selectbox("Mb", options=list(base_cfg.Mb_list), index=4)
+        if update_scheme == "single":
+            n_iter = st.number_input(
+                "n_iter", min_value=1, max_value=1000, value=100, step=10
+            )
+            n_sweeps = None
+        else:
+            n_sweeps = st.slider("n_sweeps", min_value=1, max_value=20, value=3)
+            n_iter = None
         beta = st.slider("beta", min_value=0.01, max_value=1.0, value=0.2, step=0.01)
         seed = st.number_input(
             "seed", min_value=0, max_value=2**31 - 1, value=7, step=1
         )
         theta_p_method = st.selectbox(
-            "theta_p_method", options=["lu", "svd", "lu_stabilized"]
+            "theta_p_method",
+            options=["lu", "svd", "lu_stabilized"],
+            index=1 if update_scheme == "red_black" else 0,
+            key=f"theta_p_method_{update_scheme}",
         )
-        conditioning_mode = st.selectbox("conditioning_mode", options=["hard", "soft"])
-        rhs_mode = st.selectbox("rhs_mode", options=["data", "zero"])
+        conditioning_mode = st.selectbox(
+            "conditioning_mode",
+            options=["hard", "soft"],
+            index=0,
+            key=f"conditioning_mode_{update_scheme}",
+        )
+        rhs_mode = st.selectbox(
+            "rhs_mode",
+            options=["data", "zero"],
+            index=0,
+            key=f"rhs_mode_{update_scheme}",
+        )
         rho_widget = st.number_input(
             "rho",
             min_value=1.0e-6,
@@ -275,10 +399,19 @@ def _run_dashboard() -> None:
             format="%g",
             disabled=conditioning_mode == "hard",
         )
-        proposal = st.selectbox("proposal", options=["pcn", "random_walk"])
-        run_comparison = st.checkbox("Run LU vs SVD comparison")
-        run_m5 = st.checkbox("Run M5 stability fixes comparison")
-        if n_iter > 300:
+        proposal = st.selectbox(
+            "proposal",
+            options=["pcn", "random_walk"],
+            index=0,
+            key=f"proposal_{update_scheme}",
+        )
+        if update_scheme == "single":
+            run_comparison = st.checkbox("Run LU vs SVD comparison")
+            run_m5 = st.checkbox("Run M5 stability fixes comparison")
+        else:
+            run_comparison = False
+            run_m5 = False
+        if n_iter is not None and n_iter > 300:
             st.warning("Large runs may take noticeably longer.")
 
         button_cols = st.columns(2)
@@ -286,7 +419,14 @@ def _run_dashboard() -> None:
         reset_clicked = button_cols[1].button("Reset")
 
     if reset_clicked:
-        for key in ("primary_result", "comparison_result", "m5_result", "error"):
+        for key in (
+            "primary_result",
+            "red_black_result",
+            "active_update_scheme",
+            "comparison_result",
+            "m5_result",
+            "error",
+        ):
             st.session_state.pop(key, None)
         st.rerun()
 
@@ -302,38 +442,58 @@ def _run_dashboard() -> None:
         cfg = Config(seed=int(seed), beta=float(beta))
         try:
             with st.spinner("Running conditioned sampler..."):
-                st.session_state["primary_result"] = run_method(
-                    cfg=cfg,
-                    method=method,
-                    n_iter=int(n_iter),
-                    Mb=int(Mb),
-                    beta=float(beta),
-                    seed=int(seed),
-                    proposal=proposal,
-                )
-                if run_comparison:
-                    st.session_state["comparison_result"] = run_lu_svd_comparison(
+                st.session_state["active_update_scheme"] = update_scheme
+                if update_scheme == "single":
+                    st.session_state["primary_result"] = run_method(
                         cfg=cfg,
+                        method=method,
                         n_iter=int(n_iter),
                         Mb=int(Mb),
                         beta=float(beta),
                         seed=int(seed),
                         proposal=proposal,
                     )
-                else:
-                    st.session_state.pop("comparison_result", None)
+                    st.session_state.pop("red_black_result", None)
+                    if run_comparison:
+                        st.session_state["comparison_result"] = run_lu_svd_comparison(
+                            cfg=cfg,
+                            n_iter=int(n_iter),
+                            Mb=int(Mb),
+                            beta=float(beta),
+                            seed=int(seed),
+                            proposal=proposal,
+                        )
+                    else:
+                        st.session_state.pop("comparison_result", None)
 
-                if run_m5:
-                    st.session_state["m5_result"] = run_methods(
-                        cfg=cfg,
-                        methods=default_m5_methods([1.0e1, 1.0e3]),
-                        n_iter=int(n_iter),
-                        Mb=int(Mb),
-                        beta=float(beta),
-                        seed=int(seed),
-                        proposal=proposal,
-                    )
+                    if run_m5:
+                        st.session_state["m5_result"] = run_methods(
+                            cfg=cfg,
+                            methods=default_m5_methods([1.0e1, 1.0e3]),
+                            n_iter=int(n_iter),
+                            Mb=int(Mb),
+                            beta=float(beta),
+                            seed=int(seed),
+                            proposal=proposal,
+                        )
+                    else:
+                        st.session_state.pop("m5_result", None)
                 else:
+                    _, red_black_summary = run_red_black(
+                        cfg=cfg,
+                        n_sweeps=int(n_sweeps),
+                        Mb=int(Mb),
+                        theta_p_method=theta_p_method,
+                        rng=np.random.default_rng(int(seed)),
+                        beta=float(beta),
+                        proposal=proposal,
+                        rhs_mode=rhs_mode,
+                        conditioning_mode=conditioning_mode,
+                        rho=rho,
+                    )
+                    st.session_state["red_black_result"] = red_black_summary
+                    st.session_state.pop("primary_result", None)
+                    st.session_state.pop("comparison_result", None)
                     st.session_state.pop("m5_result", None)
                 st.session_state.pop("error", None)
         except Exception as exc:  # pragma: no cover - exercised manually in Streamlit
@@ -343,8 +503,16 @@ def _run_dashboard() -> None:
     if "error" in st.session_state:
         st.error(st.session_state["error"])
 
-    if "primary_result" not in st.session_state:
+    if (
+        "primary_result" not in st.session_state
+        and "red_black_result" not in st.session_state
+    ):
         st.info("Choose controls and click Run.")
+        return
+
+    active_update_scheme = st.session_state.get("active_update_scheme", "single")
+    if active_update_scheme == "red_black" and "red_black_result" in st.session_state:
+        _show_red_black_run(st.session_state["red_black_result"])
         return
 
     states, summary = st.session_state["primary_result"]

@@ -11,6 +11,7 @@ from mcmc_multiscale.app_core import (
     MethodRunConfig,
     default_m5_methods,
     run_method,
+    run_red_black,
     summarize_states,
 )
 from mcmc_multiscale.config import Config
@@ -125,3 +126,49 @@ def test_exp05_uses_shared_helper_path_on_small_config() -> None:
         "soft_data_rho_1e+01",
     ]
     assert all(row.n_iter == 1 for row in rows)
+
+
+def test_run_red_black_collects_deterministic_dashboard_summary() -> None:
+    cfg = _small_cfg()
+    states_a, summary_a = run_red_black(
+        cfg=cfg,
+        n_sweeps=1,
+        Mb=2,
+        theta_p_method="svd",
+        rng=np.random.default_rng(cfg.seed),
+        beta=cfg.beta,
+    )
+    states_b, summary_b = run_red_black(
+        cfg=cfg,
+        n_sweeps=1,
+        Mb=2,
+        theta_p_method="svd",
+        rng=np.random.default_rng(cfg.seed),
+        beta=cfg.beta,
+    )
+
+    expected_updates = cfg.n_coarse_x * cfg.n_coarse_y
+    assert len(states_a) == expected_updates
+    assert summary_a.total_updates == expected_updates
+    assert set(summary_a.colors.tolist()) == {0, 1}
+    assert summary_a.both_colors_updated
+    assert summary_a.all_subdomains_updated
+    assert summary_a.n_color0_subdomains == expected_updates // 2
+    assert summary_a.n_color1_subdomains == expected_updates // 2
+    assert np.all(np.isfinite(summary_a.candidate_theta_norms))
+    assert np.all(np.isfinite(summary_a.accepted_theta_norms))
+    assert np.all(np.isfinite(summary_a.constraint_residuals))
+    assert np.all(np.isfinite(summary_a.final_G_accepted))
+    assert np.all(np.isfinite(summary_a.final_G_candidate))
+
+    assert summary_a.acceptance_rate == pytest.approx(summary_b.acceptance_rate)
+    np.testing.assert_allclose(
+        summary_a.candidate_theta_norms,
+        summary_b.candidate_theta_norms,
+    )
+    np.testing.assert_allclose(summary_a.final_G_accepted, summary_b.final_G_accepted)
+    for state_a, state_b in zip(states_a, states_b):
+        assert state_a.color == state_b.color
+        assert state_a.subdomain_row == state_b.subdomain_row
+        assert state_a.subdomain_col == state_b.subdomain_col
+        assert state_a.accepted == state_b.accepted

@@ -8,7 +8,12 @@ from typing import Sequence
 import numpy as np
 
 from mcmc_multiscale.config import Config
-from mcmc_multiscale.sampler import ConditionedSamplerState, conditioned_sampler
+from mcmc_multiscale.sampler import (
+    ConditionedSamplerState,
+    RedBlackSamplerState,
+    conditioned_sampler,
+    red_black_conditioned_sampler,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,41 @@ class RunSummary:
     mean_cond_B: float | None
     max_cond_B: float | None
     rho: float | None = None
+
+
+@dataclass(frozen=True)
+class RedBlackRunSummary:
+    """Collected traces and summary values for a red-black dashboard run."""
+
+    n_sweeps: int
+    Mb: int
+    beta: float
+    acceptance_rate: float
+    accepted_count: int
+    total_updates: int
+    expected_norm: float
+    candidate_theta_norms: np.ndarray
+    accepted_theta_norms: np.ndarray
+    accepted_flags: np.ndarray
+    constraint_residuals: np.ndarray
+    interface_jump_candidates: np.ndarray
+    interface_jump_accepted: np.ndarray
+    relative_k_errors_accepted: np.ndarray
+    sweeps: np.ndarray
+    colors: np.ndarray
+    subdomain_rows: np.ndarray
+    subdomain_cols: np.ndarray
+    final_G_accepted: np.ndarray
+    final_G_candidate: np.ndarray
+    max_candidate_over_expected: float
+    mean_residual: float
+    max_residual: float
+    mean_interface_jump_accepted: float
+    final_relative_k_error_accepted: float | None
+    n_color0_subdomains: int
+    n_color1_subdomains: int
+    both_colors_updated: bool
+    all_subdomains_updated: bool
 
 
 def _nan_array(values: Sequence[float | None]) -> np.ndarray:
@@ -269,3 +309,103 @@ def default_m5_methods(rho_values: Sequence[float]) -> list[MethodRunConfig]:
         for rho in rho_values
     )
     return methods
+
+
+def run_red_black(
+    cfg: Config,
+    n_sweeps: int,
+    Mb: int,
+    theta_p_method: str,
+    rng: np.random.Generator,
+    beta: float,
+    proposal: str = "pcn",
+    rhs_mode: str = "data",
+    conditioning_mode: str = "hard",
+    rho: float | None = None,
+) -> tuple[list[RedBlackSamplerState], RedBlackRunSummary]:
+    """Run red-black sweeps and collect dashboard-ready traces."""
+
+    states = list(
+        red_black_conditioned_sampler(
+            cfg=cfg,
+            n_sweeps=n_sweeps,
+            Mb=Mb,
+            theta_p_method=theta_p_method,
+            rng=rng,
+            beta=beta,
+            proposal=proposal,
+            rhs_mode=rhs_mode,
+            conditioning_mode=conditioning_mode,
+            rho=rho,
+        )
+    )
+    if len(states) == 0:
+        raise ValueError("red-black run produced no states.")
+
+    candidate_norms = np.asarray(
+        [state.theta_norm_candidate for state in states], dtype=np.float64
+    )
+    accepted_norms = np.asarray(
+        [state.theta_norm_accepted for state in states], dtype=np.float64
+    )
+    accepted_flags = np.asarray([state.accepted for state in states], dtype=bool)
+    residuals = np.asarray(
+        [state.constraint_residual_candidate for state in states], dtype=np.float64
+    )
+    jump_candidates = np.asarray(
+        [state.interface_jump_candidate for state in states], dtype=np.float64
+    )
+    jump_accepted = np.asarray(
+        [state.interface_jump_accepted for state in states], dtype=np.float64
+    )
+    relative_errors = _nan_array([state.relative_k_error_accepted for state in states])
+    sweeps = np.asarray([state.sweep for state in states], dtype=np.int64)
+    colors = np.asarray([state.color for state in states], dtype=np.int64)
+    rows = np.asarray([state.subdomain_row for state in states], dtype=np.int64)
+    cols = np.asarray([state.subdomain_col for state in states], dtype=np.int64)
+    visited = {(state.subdomain_row, state.subdomain_col) for state in states}
+    color0_subdomains = {
+        (int(row), int(col))
+        for row, col, color in zip(rows, cols, colors)
+        if color == 0
+    }
+    color1_subdomains = {
+        (int(row), int(col))
+        for row, col, color in zip(rows, cols, colors)
+        if color == 1
+    }
+    expected_norm = float(states[-1].expected_norm)
+
+    return states, RedBlackRunSummary(
+        n_sweeps=n_sweeps,
+        Mb=Mb,
+        beta=beta,
+        acceptance_rate=float(np.mean(accepted_flags)),
+        accepted_count=int(np.count_nonzero(accepted_flags)),
+        total_updates=len(states),
+        expected_norm=expected_norm,
+        candidate_theta_norms=candidate_norms,
+        accepted_theta_norms=accepted_norms,
+        accepted_flags=accepted_flags,
+        constraint_residuals=residuals,
+        interface_jump_candidates=jump_candidates,
+        interface_jump_accepted=jump_accepted,
+        relative_k_errors_accepted=relative_errors,
+        sweeps=sweeps,
+        colors=colors,
+        subdomain_rows=rows,
+        subdomain_cols=cols,
+        final_G_accepted=states[-1].G_accepted.copy(),
+        final_G_candidate=states[-1].G_candidate.copy(),
+        max_candidate_over_expected=float(np.max(candidate_norms) / expected_norm),
+        mean_residual=float(np.mean(residuals)),
+        max_residual=float(np.max(residuals)),
+        mean_interface_jump_accepted=float(np.mean(jump_accepted)),
+        final_relative_k_error_accepted=(
+            None if np.isnan(relative_errors[-1]) else float(relative_errors[-1])
+        ),
+        n_color0_subdomains=len(color0_subdomains),
+        n_color1_subdomains=len(color1_subdomains),
+        both_colors_updated=set(colors.tolist()) == {0, 1},
+        all_subdomains_updated=len(visited) == cfg.n_coarse_x * cfg.n_coarse_y,
+    )
