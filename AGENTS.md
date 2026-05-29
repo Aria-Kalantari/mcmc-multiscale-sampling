@@ -66,6 +66,20 @@ The M4 sampler is a headless single-subdomain debug harness. Do not add M5 soft
 constraints, a c=0 experiment, Streamlit, or Phase 2 abstractions unless a
 later task explicitly asks for them.
 
+## Phase 5 / M5 Scope
+
+M5 adds only:
+
+- stabilized LU hard conditioning
+- SVD/minimum-norm as the stable hard-conditioning baseline
+- c=0 hard-conditioning diagnostic mode
+- soft/proximal conditioning utilities
+- sampler support for M5 comparison modes
+- `experiments/exp05_stability_fixes.py`
+
+Do not add Streamlit, Phase 2 abstractions, private data, or full-sampler
+architecture changes unless a later task explicitly asks for them.
+
 ## Commands
 
 ```bash
@@ -74,6 +88,7 @@ python -m experiments.exp01_static_conditioning
 python -m experiments.exp02_forward_bayes_sanity
 python -m experiments.exp03_mcmc_gaussian_sanity
 python -m experiments.exp04_reproduce_instability
+python -m experiments.exp05_stability_fixes
 python -m ruff check .
 python -m black --check .
 ```

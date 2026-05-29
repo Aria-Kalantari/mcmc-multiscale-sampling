@@ -1,12 +1,12 @@
 # MCMC Multiscale Sampling with Overlapping Subdomains
 
 This repository is a from-scratch Python research implementation. The current
-state implements **M1 + M2 + M3 + M4**: the static local-conditioning core
+state implements **M1 + M2 + M3 + M4 + M5**: the static local-conditioning core
 ported from `reference/matlab/local_conditioning_project.m`, the TPFA forward
 solver and basic Bayesian observation/misfit utilities, a generic
 Metropolis-Hastings engine with random-walk and pCN proposals, and a headless
 single-subdomain conditioned sampler that reproduces the LU/pivot
-repeated-conditioning instability.
+repeated-conditioning instability and compares the M5 stability fixes.
 
 Implemented now:
 
@@ -26,9 +26,12 @@ Implemented now:
 - LU/pivot arbitrary particular solution
 - single-subdomain conditioned sampler diagnostics
 - LU-vs-SVD instability reproduction experiment
+- stabilized LU hard conditioning
+- c=0 hard-conditioning diagnostic mode
+- soft/proximal conditioning utilities
+- stability-fix comparison experiment `exp05`
 
-Not implemented yet: M5 soft constraints, c=0 experiment, Streamlit, or Phase
-2 generalization.
+Not implemented yet: Streamlit or Phase 2 generalization.
 
 ## Run
 
@@ -38,6 +41,7 @@ python -m experiments.exp01_static_conditioning
 python -m experiments.exp02_forward_bayes_sanity
 python -m experiments.exp03_mcmc_gaussian_sanity
 python -m experiments.exp04_reproduce_instability
+python -m experiments.exp05_stability_fixes
 python -m ruff check .
 python -m black --check .
 ```
