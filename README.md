@@ -36,7 +36,16 @@ python -m experiments.exp03_mcmc_gaussian_sanity
 python -m experiments.exp04_reproduce_instability
 python -m experiments.exp05_stability_fixes
 python -m experiments.exp06_red_black_updates
+python -m experiments.exp07_posterior_recovery
 ```
+
+## Acceptance Modes
+
+`Config.acceptance` defaults to `posterior`. The M8 posterior baseline adds a
+projected global-KLE field prior and the hard-null pCN proposal correction.
+The low-level conditioned samplers retain an explicit `likelihood_only` mode so
+the M4/M5 instability studies remain reproducible. `exp07_posterior_recovery`
+compares both modes for single-subdomain and red-black updates.
 
 ## Dashboard
 
@@ -65,6 +74,9 @@ tests/                        pytest verification suite
 - Research prototype, not production simulation software.
 - Single-machine sequential implementation only.
 - Synthetic examples only; no private data are included.
+- The M8 global-prior route is a baseline. Its short default comparison remains
+  only a modest recovery improvement; the constrained-manifold route in the
+  project specification remains future work.
 - The 2-color red-black schedule is deterministic frozen-snapshot scheduling.
   It is not an exact same-color parallel-independence guarantee under overlap.
   Exact independence would need a stronger coloring strategy, such as

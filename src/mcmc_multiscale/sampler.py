@@ -7,6 +7,7 @@ from typing import Iterator
 
 import numpy as np
 
+from mcmc_multiscale.bayes import GlobalKLE, log_prior_field
 from mcmc_multiscale.conditioning.constraints import (
     build_A,
     build_c,
@@ -162,6 +163,54 @@ def _acceptance_probability(log_alpha: float) -> float:
     return float(np.exp(log_alpha))
 
 
+def _validate_acceptance(acceptance: str) -> None:
+    if acceptance not in {"posterior", "likelihood_only"}:
+        raise ValueError("acceptance must be 'posterior' or 'likelihood_only'.")
+
+
+def _acceptance_log_ratio(
+    log_like_candidate: float,
+    log_like_current: float,
+    acceptance: str,
+    G_candidate_vec: np.ndarray | None = None,
+    G_current_vec: np.ndarray | None = None,
+    global_kle: GlobalKLE | None = None,
+    proposal_correction: float = 0.0,
+) -> float:
+    """Return the selected debug or posterior-correct acceptance log ratio."""
+
+    _validate_acceptance(acceptance)
+    log_alpha = float(log_like_candidate - log_like_current)
+    if acceptance == "likelihood_only":
+        return log_alpha
+    if G_candidate_vec is None or G_current_vec is None or global_kle is None:
+        raise ValueError("posterior acceptance requires fields and the global KLE.")
+    return float(
+        log_alpha
+        + log_prior_field(G_candidate_vec, global_kle)
+        - log_prior_field(G_current_vec, global_kle)
+        + proposal_correction
+    )
+
+
+def _null_pcn_proposal_correction(
+    theta_current: np.ndarray,
+    theta_candidate: np.ndarray,
+    Z: np.ndarray,
+    proposal: str,
+    conditioning_mode: str,
+) -> float:
+    """Return `log q(reverse) - log q(forward)` for hard null-space pCN."""
+
+    if proposal != "pcn" or conditioning_mode != "hard":
+        return 0.0
+    eta_current = Z.T @ theta_current
+    eta_candidate = Z.T @ theta_candidate
+    return float(
+        0.5 * (np.dot(eta_candidate, eta_candidate) - np.dot(eta_current, eta_current))
+    )
+
+
 def _particular_solution(
     A: np.ndarray, c: np.ndarray, theta_p_method: str
 ) -> tuple[np.ndarray, np.ndarray, int, float, float | None]:
@@ -298,12 +347,15 @@ def conditioned_sampler(
     rhs_mode: str = "data",
     conditioning_mode: str = "hard",
     rho: float | None = None,
+    acceptance: str = "likelihood_only",
 ) -> Iterator[ConditionedSamplerState]:
     """Run the M4 single-subdomain repeated-conditioning harness.
 
     The M4 instability path uses `theta_p + Z @ (Z.T @ theta_proposed)`, not
     the shifted affine projection. This intentionally preserves any hidden
-    null-space component of an arbitrary LU particular solution.
+    null-space component of an arbitrary LU particular solution. The low-level
+    default remains likelihood-only so the M4/M5 reproduction harnesses are
+    unchanged; pass `acceptance="posterior"` for the M8 global-prior baseline.
     """
 
     if n_iter < 1:
@@ -311,12 +363,14 @@ def conditioned_sampler(
     if update_scheme != "single":
         raise NotImplementedError("M4 implements only update_scheme='single'.")
     _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
+    _validate_acceptance(acceptance)
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
     _, _, _, _, global_pts = cell_centered_grid(cfg.nx, cfg.ny)
     C_global = exp_covariance(global_pts, cfg.sigma, cfg.corr_length)
     Phi_global, lambda_global = top_eigenpairs(C_global, cfg.n_global_modes)
+    global_kle = (Phi_global, lambda_global)
 
     theta_global_current = rng.standard_normal(cfg.n_global_modes, dtype=np.float64)
     G_current_vec = field_from_theta(Phi_global, lambda_global, theta_global_current)
@@ -366,6 +420,13 @@ def conditioned_sampler(
                 rho,
             )
         )
+        proposal_correction = _null_pcn_proposal_correction(
+            theta_current=theta_local_accepted,
+            theta_candidate=theta_local_candidate,
+            Z=Z,
+            proposal=proposal,
+            conditioning_mode=conditioning_mode,
+        )
 
         G_local_candidate = field_from_theta(
             Phi_ext, lambda_local, theta_local_candidate
@@ -379,7 +440,15 @@ def conditioned_sampler(
             pressure_candidate, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
         )
 
-        log_alpha = log_like_candidate - log_like_accepted
+        log_alpha = _acceptance_log_ratio(
+            log_like_candidate=log_like_candidate,
+            log_like_current=log_like_accepted,
+            acceptance=acceptance,
+            G_candidate_vec=candidate_vec,
+            G_current_vec=accepted_vec,
+            global_kle=global_kle,
+            proposal_correction=proposal_correction,
+        )
         accept_prob = _acceptance_probability(log_alpha)
         accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
 
@@ -443,24 +512,27 @@ def red_black_conditioned_sampler(
     rhs_mode: str = "data",
     conditioning_mode: str = "hard",
     rho: float | None = None,
+    acceptance: str = "likelihood_only",
 ) -> Iterator[RedBlackSamplerState]:
     """Run deterministic sequential red-black sweeps over all coarse subdomains.
 
     Coarse coordinates in yielded states are zero-based. Each color pass builds
     all conditioning right-hand sides from one frozen global field snapshot,
     then applies same-color local updates sequentially in sorted row/column
-    order.
+    order. Pass `acceptance="posterior"` for the M8 global-prior baseline.
     """
 
     if n_sweeps < 1:
         raise ValueError("n_sweeps must be at least 1.")
     _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
+    _validate_acceptance(acceptance)
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
     _, _, _, _, global_pts = cell_centered_grid(cfg.nx, cfg.ny)
     C_global = exp_covariance(global_pts, cfg.sigma, cfg.corr_length)
     Phi_global, lambda_global = top_eigenpairs(C_global, cfg.n_global_modes)
+    global_kle = (Phi_global, lambda_global)
 
     theta_global_current = rng.standard_normal(cfg.n_global_modes, dtype=np.float64)
     G_current_vec = field_from_theta(Phi_global, lambda_global, theta_global_current)
@@ -518,6 +590,13 @@ def red_black_conditioned_sampler(
                     rhs_mode,
                     rho,
                 )
+                proposal_correction = _null_pcn_proposal_correction(
+                    theta_current=theta_local_current,
+                    theta_candidate=theta_local_candidate,
+                    Z=Z,
+                    proposal=proposal,
+                    conditioning_mode=conditioning_mode,
+                )
 
                 G_local_candidate = field_from_theta(
                     data.Phi_ext, data.lambda_local, theta_local_candidate
@@ -534,7 +613,15 @@ def red_black_conditioned_sampler(
                     pressure_candidate, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
                 )
 
-                log_alpha = log_like_candidate - log_like_accepted
+                log_alpha = _acceptance_log_ratio(
+                    log_like_candidate=log_like_candidate,
+                    log_like_current=log_like_accepted,
+                    acceptance=acceptance,
+                    G_candidate_vec=candidate_vec,
+                    G_current_vec=accepted_vec,
+                    global_kle=global_kle,
+                    proposal_correction=proposal_correction,
+                )
                 accept_prob = _acceptance_probability(log_alpha)
                 accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
 
