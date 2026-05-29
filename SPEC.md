@@ -151,7 +151,7 @@ Repository layout:
 ```
 .
 ├─ SPEC.md                     # this file
-├─ NOTES.md                    # agent's running decision log (create it)
+├─ NOTES.md                    # implementation notes
 ├─ pyproject.toml / requirements.txt
 ├─ src/mcmc_multiscale/
 │  ├─ config.py        grid.py        covariance.py   kle.py        field.py

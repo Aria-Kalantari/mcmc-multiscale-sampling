@@ -1,51 +1,72 @@
 # MCMC Multiscale Sampling with Overlapping Subdomains
 
-This repository is a from-scratch Python research implementation. The current
-state implements **M1 + M2 + M3 + M4 + M5 + M6**: the static local-conditioning core
-ported from `reference/matlab/local_conditioning_project.m`, the TPFA forward
-solver and basic Bayesian observation/misfit utilities, a generic
-Metropolis-Hastings engine with random-walk and pCN proposals, and a headless
-single-subdomain conditioned sampler that reproduces the LU/pivot
-repeated-conditioning instability, compares the M5 stability fixes, and
-provides a Streamlit dashboard for interactive viewing.
+This repository is a Python research prototype for Bayesian inversion of a
+spatially varying log-permeability field. It combines Gaussian random fields,
+Karhunen-Loeve expansions, TPFA Darcy flow, Metropolis-Hastings sampling, and
+overlapping-subdomain conditioning to study stability in multiscale MCMC
+updates.
 
-Implemented now:
+The main numerical finding is that an arbitrary LU/pivot particular solution
+for the local hard-conditioning system can carry hidden null-space content that
+accumulates under repeated updates. SVD/minimum-norm conditioning and stabilized
+LU remove that hidden component. Soft conditioning provides a tunable
+residual-versus-stability tradeoff, and red-black sweeps extend the update
+schedule across the coarse partition with deterministic frozen snapshots.
 
-- grid construction with MATLAB-compatible Fortran-order flattening
-- exponential covariance matrices
-- dense KLE eigenpairs
-- log-field reconstruction helpers
-- target overlapping subdomain construction
-- hard conditioning constraints
-- SVD minimum-norm particular solution and null-space basis
-- static conditioning experiment `exp01`
-- sparse TPFA Darcy pressure solver
-- synthetic pressure observations
-- prior, likelihood/misfit, and posterior helpers
-- random-walk and pCN proposal kernels
-- generic Metropolis-Hastings generator
-- LU/pivot arbitrary particular solution
-- single-subdomain conditioned sampler diagnostics
-- LU-vs-SVD instability reproduction experiment
-- stabilized LU hard conditioning
-- c=0 hard-conditioning diagnostic mode
-- soft/proximal conditioning utilities
-- stability-fix comparison experiment `exp05`
-- Streamlit dashboard `app/streamlit_app.py`
-- shared Streamlit-free app summary helpers
+## Install
 
-Not implemented yet: Phase 2 generalization.
+```bash
+python -m pip install -r requirements.txt
+```
 
-## Run
+## Verify
 
 ```bash
 python -m pytest
+python -m ruff check .
+python -m black --check .
+```
+
+## Experiments
+
+```bash
 python -m experiments.exp01_static_conditioning
 python -m experiments.exp02_forward_bayes_sanity
 python -m experiments.exp03_mcmc_gaussian_sanity
 python -m experiments.exp04_reproduce_instability
 python -m experiments.exp05_stability_fixes
-python -m streamlit run app/streamlit_app.py
-python -m ruff check .
-python -m black --check .
+python -m experiments.exp06_red_black_updates
 ```
+
+## Dashboard
+
+```bash
+python -m streamlit run app/streamlit_app.py
+```
+
+The dashboard visualizes the single-subdomain sampler, LU/SVD stability
+comparisons, and a compact M5 stability-fix comparison.
+
+## Repository Structure
+
+```text
+src/mcmc_multiscale/          numerical library
+src/mcmc_multiscale/forward/  TPFA pressure solver
+src/mcmc_multiscale/conditioning/
+                              hard, stabilized, and soft conditioning
+experiments/                  headless reproducibility experiments
+app/                          Streamlit dashboard
+tests/                        pytest verification suite
+```
+
+## Limitations
+
+- Research prototype, not production simulation software.
+- Single-machine sequential implementation only.
+- Synthetic examples only; no private data are included.
+- The 2-color red-black schedule is deterministic frozen-snapshot scheduling.
+  It is not an exact same-color parallel-independence guarantee under overlap.
+  Exact independence would need a stronger coloring strategy, such as
+  4-coloring, or additional overlap analysis.
+- The Streamlit dashboard is a batch-run viewer; it does not implement
+  pause/resume streaming.
