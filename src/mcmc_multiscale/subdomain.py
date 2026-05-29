@@ -29,7 +29,17 @@ class Subdomain:
 
 
 def make_subdomain(cfg: Config) -> Subdomain:
-    """Mirror MATLAB `makeSubdomain` using zero-based Python indices."""
+    """Mirror MATLAB `makeSubdomain` for the configured target.
+
+    `Config.target_row` and `Config.target_col` are one-based. New helper
+    functions below use zero-based coarse coordinates internally.
+    """
+
+    return make_subdomain_at(cfg, cfg.target_row - 1, cfg.target_col - 1)
+
+
+def make_subdomain_at(cfg: Config, target_row: int, target_col: int) -> Subdomain:
+    """Build a subdomain at zero-based coarse coordinates."""
 
     if cfg.nx % cfg.n_coarse_x != 0 or cfg.ny % cfg.n_coarse_y != 0:
         raise ValueError("nx and ny must be divisible by the coarse grid.")
@@ -37,13 +47,13 @@ def make_subdomain(cfg: Config) -> Subdomain:
     block_x = cfg.nx // cfg.n_coarse_x
     block_y = cfg.ny // cfg.n_coarse_y
 
-    if not (1 <= cfg.target_col <= cfg.n_coarse_x):
-        raise ValueError("target_col is one-based and must be within n_coarse_x.")
-    if not (1 <= cfg.target_row <= cfg.n_coarse_y):
-        raise ValueError("target_row is one-based and must be within n_coarse_y.")
+    if not (0 <= target_col < cfg.n_coarse_x):
+        raise ValueError("target_col must be zero-based and within n_coarse_x.")
+    if not (0 <= target_row < cfg.n_coarse_y):
+        raise ValueError("target_row must be zero-based and within n_coarse_y.")
 
-    col0 = (cfg.target_col - 1) * block_x
-    row0 = (cfg.target_row - 1) * block_y
+    col0 = target_col * block_x
+    row0 = target_row * block_y
     core_cols = np.arange(col0, col0 + block_x, dtype=np.int64)
     core_rows = np.arange(row0, row0 + block_y, dtype=np.int64)
 
@@ -76,6 +86,29 @@ def make_subdomain(cfg: Config) -> Subdomain:
         core_local_idx=np.flatnonzero(is_core).astype(np.int64),
         buffer_local_idx=np.flatnonzero(~is_core).astype(np.int64),
     )
+
+
+def iter_coarse_subdomains(cfg: Config) -> list[tuple[int, int]]:
+    """Return all zero-based coarse coordinates in sorted row-major order."""
+
+    return [
+        (row, col) for row in range(cfg.n_coarse_y) for col in range(cfg.n_coarse_x)
+    ]
+
+
+def checkerboard_color(row: int, col: int) -> int:
+    """Return the 2-color checkerboard color for zero-based coordinates."""
+
+    return int((row + col) % 2)
+
+
+def red_black_order(cfg: Config) -> dict[int, list[tuple[int, int]]]:
+    """Return zero-based coarse coordinates grouped by checkerboard color."""
+
+    order: dict[int, list[tuple[int, int]]] = {0: [], 1: []}
+    for row, col in iter_coarse_subdomains(cfg):
+        order[checkerboard_color(row, col)].append((row, col))
+    return order
 
 
 def interface_jump_rms(G: np.ndarray, sub: Subdomain) -> float:
