@@ -8,7 +8,8 @@
   identifiers, matching the MATLAB parameter convention.
 - `top_eigenpairs` uses SciPy dense `eigh` with a top-eigenpair subset. This is
   deterministic and sign-agnostic tests avoid comparing raw eigenvector signs.
-- `lu_pivot` is intentionally a Phase 2/M4 placeholder and is not used in M1.
+- `lu_pivot` was left unused in M1; it is implemented in M4 as the arbitrary
+  pivot-column particular solution for instability reproduction.
 
 ## M2 Implementation
 
@@ -62,6 +63,55 @@
   max mean shift `6.7805e-03` and max covariance shift `1.0228e-02`.
 - No conditioned sampler, LU/pivot instability reproduction, soft constraints,
   or Streamlit code has been added yet.
+
+## M4 Implementation
+
+- Experiment numbering shift: the original SPEC names the instability
+  experiment `exp02_reproduce_instability.py`, but this repository already uses
+  `exp02` and `exp03` for M2/M3 sanity checks. The M4 instability experiment is
+  therefore `experiments/exp04_reproduce_instability.py`.
+- `lu_pivot` is intentionally arbitrary and unstable: it selects pivot columns
+  by QR with column pivoting, solves the pivot block by LU factorization, sets
+  non-pivot coordinates to zero, and does not remove hidden null-space content.
+- The M4 sampler carries a current accepted local extended coefficient vector
+  `theta_local_accepted` in `R^{N_ext}`. Each iteration proposes from it with
+  pCN by default:
+  `sqrt(1 - beta**2) * theta_local_accepted + beta * xi`.
+- The conditioned candidate uses the Pereira/Aidan-style repeated-conditioning
+  mechanism `theta_p + Z @ (Z.T @ theta_proposed)`. It deliberately does not
+  use the shifted affine projection `theta_p + Z @ (Z.T @ (theta - theta_p))`
+  on the instability path, because that projection can cancel the hidden
+  null-space component of an arbitrary particular solution.
+- Default `Config.beta` is `0.2`. Smaller beta can exaggerate LU drift because
+  the retained null component decays slowly between repeated conditioning
+  steps.
+- In the single-subdomain M4 harness, only the core cells are copied back into
+  the global field. The conditioning points are in the buffer, so the RHS `c`
+  is effectively constant across iterations. This isolates the repeated local
+  coefficient mechanism.
+- The initial `theta_local_accepted` is a deterministic standard-normal draw.
+  It does not need to be range-consistent with `G_current`, because each
+  conditioning step discards the range component and replaces it with the
+  current particular solution.
+- M4 uses a likelihood-ratio accept/reject step on pressure data only:
+  `log_alpha = log_like_candidate - log_like_current`. This is a debug harness,
+  not the final mathematically polished sampler.
+- Likelihood-only acceptance has no prior penalty on `||theta||`, so nothing
+  pulls the null component back toward the prior. This is intentional for M4.
+- Candidate and accepted/current norms are both tracked. MH rejection may
+  suppress accepted-chain drift even when the generation step is unstable.
+- The sampler yields/saves the actually generated candidate field and the
+  accepted/current field every iteration because the process is path-dependent.
+- The primary M4 instability flag is relative:
+  `LU max candidate theta norm / SVD max candidate theta norm > 2.0`. Accepted
+  ratios and absolute ratios to the expected Gaussian norm are also reported.
+- The default observed run `python -m experiments.exp04_reproduce_instability`
+  triggered the criterion: LU/SVD max candidate norm ratio `3.5386`, LU/SVD
+  max accepted norm ratio `3.5306`, LU candidate max norm `43.8965`, SVD
+  candidate max norm `12.4050`, expected Gaussian norm `6.7456`, LU acceptance
+  `0.260`, SVD acceptance `0.263`, and accepted-chain LU drift was visible.
+- No M5 soft constraints, c=0 experiment, Streamlit app, or Phase 2
+  abstractions have been added.
 
 ## Deviations From SPEC.md
 

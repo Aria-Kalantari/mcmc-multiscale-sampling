@@ -33,3 +33,4 @@ class Config:
     n_obs_y: int = 8
     left_pressure: float = 1.0
     right_pressure: float = 0.0
+    beta: float = 0.2
