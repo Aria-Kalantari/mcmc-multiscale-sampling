@@ -7,3 +7,5 @@ outputs/
 *.mat
 *.zip
 .DS_Store
+SPEC.md
+src/mcmc_multiscale_sampling.egg-info/
