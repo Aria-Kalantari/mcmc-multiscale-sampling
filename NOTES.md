@@ -515,3 +515,75 @@
   discussion should focus on the complete conditioned-prior /
   constraint-manifold acceptance derivation rather than forcing a positive
   recovery claim.
+
+## Precision-Based Block-Gibbs Update (posterior-correct multiscale)
+
+- This implements `docs/conditioned_posterior_derivation.md`: the local-KLE
+  conditionals are incompatible (Besag compatibility fails), so no acceptance
+  correction can fix the existing red-black construction. The fix is a different
+  sampler, added alongside (not replacing) the old modes.
+- The proper full-rank prior is `G ~ N(0, C_tau)` with
+  `C_tau = Phi diag(lam) Phi.T + tau2 I`. `Config.block_nugget` is `tau2`
+  (default `1e-4`). For the `48x48` default the retained eigenvalues run
+  `lam[0]=302.7` down to `lam[89]=2.245`, so `tau2` from `1e-4` to `1e-2` all
+  satisfy `tau2 << lam_N`: every retained mode keeps variance `lam_m + tau2 ~
+  lam_m`, while directions outside `span(Phi)` get variance `tau2` (precision
+  `1/tau2`), which is what suppresses the prior-invisible rough overfitting.
+- `conditioning/gaussian_block.py` is pure, float64, explicit `Generator`, and
+  never forms an `n x n` inverse. The Woodbury precision is
+  `Q = (1/tau2)[I - Phi diag(d) Phi.T]`, `d = lam/(lam+tau2)`, with an `O(nN)`
+  matvec and a closed-form principal submatrix `Q_SS`. `BlockConditioner` holds
+  a core block's global indices plus the Cholesky factor of `Q_SS`. The block
+  full conditional is `N(m_S, Q_SS^{-1})` with the regression mean
+  `m_S = g_S - Q_SS^{-1} (Q g)_S` (no `Q_SR` formed), and `propose_block` is pCN
+  around `m_S` drawing `w ~ N(0, Q_SS^{-1})` as `L^{-T} zeta`.
+- `sampler.py::block_gibbs_sampler` is a new function. It is a systematic-scan
+  sweep over the core blocks, which tile the grid exactly (16 cores of 144 cells
+  on the default grid), each updated from its full conditional. Because the pCN
+  proposal is reversible w.r.t. the block base Gaussian, the block Metropolis
+  acceptance is exactly likelihood-only (`log_alpha = delta_log_like`), so a
+  sweep targets `pi(G | Y) ~ exp(-Phi_mis) N(0, C_tau)`. The existing
+  `conditioned_sampler` / `red_black_conditioned_sampler` and the
+  `likelihood_only` / `global_field` / `null_space` modes are untouched; the rng
+  draw order (truth prefix, then one initial global field) matches the
+  conditioned samplers so the exp08c matched-start replay adapter applies.
+- `tests/test_gaussian_block.py` covers the two decisive correctness gates plus
+  supporting checks: (1) Woodbury precision and `Q_SS` match dense
+  `C_tau^{-1}`/its submatrix; (2) pCN-around-conditional detailed balance w.r.t.
+  the base Gaussian and `propose_block` realises the analytic transition kernel;
+  (3) **no-data invariance** — a sweep leaves `N(0, C_tau)` invariant
+  (mean -> 0, cov -> `C_tau`); (4) **linear-Gaussian exactness** — with a linear
+  forward map `H`, the sweep reproduces the analytic Gaussian posterior
+  `mu_post`, `Sigma_post = (Q + H^T H / sigma^2)^{-1}` (observed max mean/cov
+  error `~5e-3` against tolerances `0.04`/`0.05`); (5) reduction — whole-domain
+  block has `m_S = 0`, `Q_SS = Q` (global pCN), and the sampler acceptance is
+  exactly the likelihood ratio; (6) determinism for a fixed seed. The
+  linear-Gaussian gate is the real correctness check: a method that merely lowers
+  rel-k (as the incompatible-conditional construction did) cannot pass it.
+- `exp08c_recovery_decision.py` gains an opt-in `--block-gibbs` scheme (with
+  `--block-nugget`); the routine and `--decide`/`--resolve` profiles are
+  otherwise unchanged, and the existing red-black-vs-pCN verdict is untouched.
+  The block-Gibbs scheme reports its own rel-k trajectory and a "reversal cured"
+  check against global pCN.
+- Recovery status (honest). The decisive correctness evidence is the
+  linear-Gaussian exactness gate (block-Gibbs reproduces `mu_post`/`Sigma_post`),
+  which the incompatible-conditional `global_field`/`null_space` constructions
+  cannot pass. On a reduced `16x16` grid (40 modes, 36 sensors, floor `18`)
+  run to convergence with `4` pooled chains, posterior-mean relative-k was
+  `0.502` for block-Gibbs (`tau2=1e-4`), `0.498` (`tau2=1e-3`), and `0.308` for
+  global pCN; block-Gibbs data misfit fell to `1.7-3.5x` the noise floor.
+  Block-Gibbs recovers the field (rel-k well below 1) and stays bounded with no
+  reversal -- qualitatively unlike the `global_field` reversal (`0.46 -> 0.886`)
+  and the likelihood-only blow-up (`rel-k ~ 1e13`). The remaining gap to global
+  pCN (`~0.50` vs `~0.31` at this budget) is a mixing/sample-size effect, not a
+  bias: pooling more chains lowers the block-Gibbs estimate (some single chains
+  mix slowly, e.g. a stuck chain at `~1.4-2.1`), and the posterior is proven
+  correct (`C_tau ~ C_N` for `tau2 << lam_N`). Larger `tau2` (still `<< lam_N`)
+  mixes faster and fits data better at equal budget with similar recovery;
+  `tau2=1e-4` stays the conservative anti-overfit default. On the full `48x48`
+  setup a single short chain drives misfit to `~1.8x` floor with rel-k bounded
+  and non-diverging; the converged multi-chain comparison there needs the
+  multi-hour budget via `python -m experiments.exp08c_recovery_decision
+  --block-gibbs --resolve`, which is wired but was not run to completion here.
+  Closing the efficiency gap is an M11 (mixing/tuning) question, not an M8
+  correctness one.

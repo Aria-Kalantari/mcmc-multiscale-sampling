@@ -13,6 +13,12 @@ from mcmc_multiscale.conditioning.constraints import (
     build_c,
     select_conditioning_points,
 )
+from mcmc_multiscale.conditioning.gaussian_block import (
+    BlockConditioner,
+    build_precision,
+    make_block_conditioner,
+    propose_block,
+)
 from mcmc_multiscale.conditioning.nullspace import null_basis, project_null
 from mcmc_multiscale.conditioning.particular import lu_pivot, svd_min_norm
 from mcmc_multiscale.conditioning.project import stabilize
@@ -37,6 +43,7 @@ from mcmc_multiscale.kle import top_eigenpairs
 from mcmc_multiscale.observations import make_truth, restrict_pressure
 from mcmc_multiscale.subdomain import (
     Subdomain,
+    iter_coarse_subdomains,
     make_subdomain,
     make_subdomain_at,
     red_black_order,
@@ -112,6 +119,33 @@ class RedBlackSamplerState:
     null_space_norm_candidate: float
     null_space_norm_accepted: float
     hidden_null_norm: float
+
+
+@dataclass(frozen=True)
+class BlockGibbsSamplerState:
+    """One core-block full-conditional update from a precision block-Gibbs sweep.
+
+    The yielded diagnostics mirror the existing sampler states closely enough for
+    the shared experiment harness: ``G_accepted`` is the current global field,
+    ``theta_norm_accepted`` the global-KLE-projected coefficient norm, and the
+    acceptance is exactly likelihood-only.
+    """
+
+    sweep: int
+    block_index: int
+    subdomain_row: int
+    subdomain_col: int
+    accepted: bool
+    acceptance_probability: float
+    log_likelihood_accepted: float
+    log_likelihood_candidate: float
+    theta_norm_accepted: float
+    expected_norm: float
+    block_nugget: float
+    relative_k_error_accepted: float | None
+    relative_k_error_candidate: float | None
+    G_accepted: np.ndarray
+    G_candidate: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -720,3 +754,105 @@ def red_black_conditioned_sampler(
                     null_space_norm_accepted=theta_norm(Z.T @ theta_local_accepted),
                     hidden_null_norm=hidden_null_norm,
                 )
+
+
+def block_gibbs_sampler(
+    cfg: Config,
+    n_sweeps: int,
+    rng: np.random.Generator,
+    beta: float | None = None,
+    block_nugget: float | None = None,
+) -> Iterator[BlockGibbsSamplerState]:
+    """Run systematic-scan precision block-Gibbs sweeps over the core blocks.
+
+    This is the posterior-correct multiscale update derived in
+    ``docs/conditioned_posterior_derivation.md``. Each core block (the core cells
+    of one coarse subdomain; the cores tile the grid) is updated from its exact
+    Gaussian full conditional under the proper full-rank prior ``N(0, C_tau)``,
+    ``C_tau = Phi diag(lam) Phi.T + tau2 I``, using a pCN proposal around the
+    conditional mean. Because that proposal is reversible w.r.t. the block's base
+    Gaussian, the Metropolis acceptance is exactly likelihood-only, and a sweep
+    over all cores targets ``pi(G | Y) ~ exp(-Phi_mis) N(0, C_tau)``.
+
+    This is additive: it does not modify ``conditioned_sampler`` /
+    ``red_black_conditioned_sampler`` or their ``likelihood_only`` /
+    ``global_field`` / ``null_space`` acceptance modes. The rng draw order
+    matches the conditioned samplers (truth prefix, then the initial global
+    field) so the experiment-only matched-start replay adapter applies unchanged.
+    """
+
+    if n_sweeps < 1:
+        raise ValueError("n_sweeps must be at least 1.")
+    beta_value = cfg.beta if beta is None else float(beta)
+    tau2 = cfg.block_nugget if block_nugget is None else float(block_nugget)
+    if not np.isfinite(tau2) or tau2 <= 0.0:
+        raise ValueError("block_nugget (tau^2) must be positive.")
+
+    truth = make_truth(cfg, rng)
+    _, _, _, _, global_pts = cell_centered_grid(cfg.nx, cfg.ny)
+    C_global = exp_covariance(global_pts, cfg.sigma, cfg.corr_length)
+    Phi_global, lambda_global = top_eigenpairs(C_global, cfg.n_global_modes)
+    sqrt_lambda_global = np.sqrt(lambda_global)
+
+    precision = build_precision(Phi_global, lambda_global, tau2)
+    blocks: list[tuple[int, int, BlockConditioner]] = []
+    for row, col in iter_coarse_subdomains(cfg):
+        sub = make_subdomain_at(cfg, row, col)
+        conditioner = make_block_conditioner(precision, sub.core_global_idx)
+        blocks.append((row, col, conditioner))
+
+    theta_global_current = rng.standard_normal(cfg.n_global_modes, dtype=np.float64)
+    G_vec = field_from_theta(Phi_global, lambda_global, theta_global_current)
+    G_accepted = reshape_field(G_vec, cfg.ny, cfg.nx)
+    k_accepted = permeability_from_log_field(G_accepted)
+    fwd = ForwardModel(cfg)
+    pressure_accepted = fwd.solve(k_accepted)
+    log_like_accepted = _pressure_log_likelihood(
+        pressure_accepted, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
+    )
+    expected_norm = expected_gaussian_norm(cfg.n_global_modes)
+
+    for sweep in range(1, n_sweeps + 1):
+        for block_index, (row, col, conditioner) in enumerate(blocks):
+            g_block_candidate = propose_block(
+                precision, conditioner, G_vec, beta_value, rng
+            )
+            candidate_vec = G_vec.copy()
+            candidate_vec[conditioner.global_idx] = g_block_candidate
+            G_candidate = reshape_field(candidate_vec, cfg.ny, cfg.nx)
+            k_candidate = permeability_from_log_field(G_candidate)
+            pressure_candidate = fwd.solve(k_candidate)
+            log_like_candidate = _pressure_log_likelihood(
+                pressure_candidate, truth.y_obs, truth.sensor_idx, cfg.sigma_obs
+            )
+
+            # Acceptance is exactly likelihood-only: the conditional Gaussian and
+            # the pCN proposal density cancel in the block MH ratio.
+            log_alpha = float(log_like_candidate - log_like_accepted)
+            accept_prob = _acceptance_probability(log_alpha)
+            accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
+
+            if accepted:
+                G_vec = candidate_vec
+                G_accepted = G_candidate
+                k_accepted = k_candidate
+                log_like_accepted = log_like_candidate
+
+            theta_global_proj = (Phi_global.T @ G_vec) / sqrt_lambda_global
+            yield BlockGibbsSamplerState(
+                sweep=sweep,
+                block_index=block_index,
+                subdomain_row=row,
+                subdomain_col=col,
+                accepted=accepted,
+                acceptance_probability=accept_prob,
+                log_likelihood_accepted=float(log_like_accepted),
+                log_likelihood_candidate=float(log_like_candidate),
+                theta_norm_accepted=float(np.linalg.norm(theta_global_proj)),
+                expected_norm=expected_norm,
+                block_nugget=tau2,
+                relative_k_error_accepted=relative_error(k_accepted, truth.k_true),
+                relative_k_error_candidate=relative_error(k_candidate, truth.k_true),
+                G_accepted=G_accepted.copy(),
+                G_candidate=G_candidate.copy(),
+            )

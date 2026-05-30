@@ -37,3 +37,4 @@ class Config:
     acceptance: str = "posterior"
     prior_mode: str = "global_field"
     n_chains: int = 4
+    block_nugget: float = 1e-4

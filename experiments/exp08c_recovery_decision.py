@@ -42,7 +42,9 @@ from mcmc_multiscale.mcmc import MCMCState, metropolis_hastings  # noqa: E402
 from mcmc_multiscale.observations import TruthData  # noqa: E402
 from mcmc_multiscale.proposals import make_pcn_proposal  # noqa: E402
 from mcmc_multiscale.sampler import (  # noqa: E402
+    BlockGibbsSamplerState,
     RedBlackSamplerState,
+    block_gibbs_sampler,
     red_black_conditioned_sampler,
 )
 
@@ -392,6 +394,67 @@ def _red_black_chain(
         field_and_misfit=field_and_misfit,
     )
     return _finish_chain(*consumed, solve_offset=2, Phi=Phi, lam=lam)
+
+
+def _block_gibbs_chain(
+    cfg: Config,
+    truth_draw: np.ndarray,
+    noise_draw: np.ndarray,
+    Phi: np.ndarray,
+    lam: np.ndarray,
+    chain_seed: int,
+    n_sweeps: int,
+    beta: float,
+    burn_fraction: float,
+    sample_stride: int,
+    wall_cap_seconds: float,
+    block_nugget: float,
+) -> DecisionChain:
+    """Run a precision block-Gibbs chain on a matched unit-scale prior start.
+
+    The block-Gibbs sampler draws the truth prefix and then one initial global
+    field, identical to the red-black setup, so the replay adapter delivers a
+    matched start. It carries no local null coordinates, so the null-space and
+    theta_p columns are reported as NaN like the global-pCN chain.
+    """
+
+    n_subdomains = cfg.n_coarse_x * cfg.n_coarse_y
+    rng = _TruthReplayGenerator(
+        theta_true_draw=truth_draw,
+        noise_draw=noise_draw,
+        chain_seed=chain_seed,
+        n_initial_draws=1,
+        initial_scale=1.0,
+    )
+    states = block_gibbs_sampler(
+        cfg=cfg,
+        n_sweeps=n_sweeps,
+        rng=rng,  # type: ignore[arg-type]
+        beta=beta,
+        block_nugget=block_nugget,
+    )
+
+    def field_and_misfit(
+        state: BlockGibbsSamplerState,
+    ) -> tuple[np.ndarray, float, float, float, float]:
+        return (
+            state.G_accepted.copy(),
+            -state.log_likelihood_accepted,
+            state.theta_norm_accepted,
+            np.nan,
+            np.nan,
+        )
+
+    consumed = _consume_states(
+        states=states,
+        max_updates=n_sweeps * n_subdomains,
+        burn_fraction=burn_fraction,
+        sample_stride=sample_stride,
+        solve_offset=1,
+        wall_cap_seconds=wall_cap_seconds,
+        field_and_misfit=field_and_misfit,
+    )
+    return _finish_chain(*consumed, solve_offset=1, Phi=Phi, lam=lam)
 
 
 def _global_pcn_chain(
@@ -840,6 +903,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--burn-fraction", type=float, default=1.0 / 3.0)
     parser.add_argument("--coverage-level", type=float, default=0.9)
+    parser.add_argument(
+        "--block-gibbs",
+        action="store_true",
+        help="Also run the opt-in precision block-Gibbs scheme.",
+    )
+    parser.add_argument(
+        "--block-nugget",
+        type=float,
+        default=None,
+        help="Override the block-Gibbs nugget tau^2 (default Config.block_nugget).",
+    )
     args = parser.parse_args()
 
     if args.n_chains < 4:
@@ -854,6 +928,9 @@ def main() -> None:
     seeds = [args.seed + 1_000 + idx for idx in range(args.n_chains)]
     per_chain_cap = profile.wall_cap_seconds / args.n_chains
     noise_floor = 0.5 * cfg.n_obs_x * cfg.n_obs_y
+    block_nugget = (
+        cfg.block_nugget if args.block_nugget is None else float(args.block_nugget)
+    )
 
     red_black_global_field = [
         _red_black_chain(
@@ -942,6 +1019,38 @@ def main() -> None:
         ),
     ]
 
+    block_gibbs_summary: DecisionSummary | None = None
+    if args.block_gibbs:
+        block_gibbs = [
+            _block_gibbs_chain(
+                cfg=cfg,
+                truth_draw=theta_true_draw,
+                noise_draw=noise_draw,
+                Phi=Phi,
+                lam=lam,
+                chain_seed=chain_seed,
+                n_sweeps=profile.red_black_sweeps,
+                beta=args.beta,
+                burn_fraction=args.burn_fraction,
+                sample_stride=profile.sample_stride,
+                wall_cap_seconds=per_chain_cap,
+                block_nugget=block_nugget,
+            )
+            for chain_seed in seeds
+        ]
+        block_gibbs_summary = _summarize(
+            "block_gibbs",
+            block_gibbs,
+            truth,
+            noise_floor,
+            args.coverage_level,
+            profile.trajectory_points,
+            profile.stabilization_window,
+            profile.stabilization_tolerance,
+            profile.misfit_trend_fraction,
+        )
+        summaries.append(block_gibbs_summary)
+
     print("M9C RECOVERY DECISION")
     print(
         f"profile={profile.label}; grid={cfg.ny} x {cfg.nx}; "
@@ -965,6 +1074,13 @@ def main() -> None:
         "reference-style delta_like - 0.5 * delta(||Z.T theta||^2); adding the "
         "pCN q-ratio there would cancel the null-prior term into a no-op."
     )
+    if block_gibbs_summary is not None:
+        print(
+            "Block-Gibbs note: the opt-in block_gibbs scheme is the "
+            "posterior-correct precision update (exact full conditionals of "
+            f"N(0, C_tau), tau^2={block_nugget:g}); its acceptance is exactly "
+            "likelihood-only and a sweep targets pi(G | Y)."
+        )
     print()
     print("RECOVERY AND COMPUTE-FAIR SUMMARY")
     _print_summary_table(summaries, noise_floor)
@@ -975,6 +1091,32 @@ def main() -> None:
     print(
         f"  {_verdict(summaries[1], summaries[2], noise_floor, recovery_gap_tolerance=profile.recovery_gap_tolerance)}"
     )
+
+    if block_gibbs_summary is not None:
+        global_pcn_summary = summaries[2]
+        reversal_cured = (
+            block_gibbs_summary.relative_k_stable
+            and block_gibbs_summary.trajectory_shape != "rising"
+            and block_gibbs_summary.relative_k_error
+            <= global_pcn_summary.relative_k_error + profile.recovery_gap_tolerance
+        )
+        print()
+        print("Block-Gibbs recovery check (vs global pCN):")
+        print(
+            f"  block_gibbs rel-k={block_gibbs_summary.relative_k_error:.4f} "
+            f"(shape={block_gibbs_summary.trajectory_shape}, "
+            f"flat={block_gibbs_summary.relative_k_stable}, "
+            f"tail_misfit={block_gibbs_summary.tail_mean_misfit:.3f}); "
+            f"global_pcn rel-k={global_pcn_summary.relative_k_error:.4f}."
+        )
+        print(
+            "  REVERSAL CURED: block-Gibbs relative-k flattened at or below the "
+            "global-pCN plateau without rising."
+            if reversal_cured
+            else "  NOT YET CURED: block-Gibbs relative-k has not flattened at or "
+            "below global pCN; increase --max-seconds/--sweeps or retune "
+            "--block-nugget."
+        )
 
 
 if __name__ == "__main__":
