@@ -38,6 +38,7 @@ python -m experiments.exp05_stability_fixes
 python -m experiments.exp06_red_black_updates
 python -m experiments.exp07_posterior_recovery
 python -m experiments.exp08_convergence_diagnostics
+python -m experiments.exp08c_recovery_decision
 ```
 
 ## Acceptance Modes
@@ -62,6 +63,17 @@ python -m experiments.exp08_convergence_diagnostics --long
 The deep-dive reports conservative ESS per 1000 forward solves and ESS per
 wall-second alongside recovery and coverage. The plain exp08 command keeps its
 responsive defaults for routine development.
+
+For the opt-in recovery decision, compare red-black directly against global
+pCN with matched unit-scale starts, trajectory checkpoints, and a wall cap:
+
+```bash
+python -m experiments.exp08c_recovery_decision --decide
+```
+
+This excludes the structurally frozen single-subdomain harness from the
+recovery verdict and reports whether the requested proposal budget or wall cap
+ended each scheme.
 
 ## Dashboard
 

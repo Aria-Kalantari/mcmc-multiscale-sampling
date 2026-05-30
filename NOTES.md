@@ -387,3 +387,58 @@
   solve-efficient, while global pCN still has materially lower relative-k.
   Route SPEC section 3.8(b) is warranted as an investigation alongside
   longer-chain runs, but the current evidence does not prove it is the fix.
+
+## M9 Recovery Decision
+
+- `experiments/exp08c_recovery_decision.py` narrows the recovery verdict to
+  posterior red-black versus plain global pCN. It excludes the
+  single-subdomain harness because that path updates one target core while
+  freezing the rest of the field; across different starts it is structurally
+  non-ergodic and its global-field `R_hat` is not a meaningful mixing measure.
+- Both compared schemes use matched moderate starts: distinct seeded prior
+  draws at unit scale, with the same synthetic truth and observation noise.
+  This removes the earlier scale-`2.0` over-dispersion confound.
+- The routine command is intentionally fast. The opt-in decision profile is:
+  `python -m experiments.exp08c_recovery_decision --decide`. It requests `4`
+  chains, `500` red-black sweeps, `10000` global-pCN proposals, a `600`-second
+  per-scheme wall cap split evenly across chains, stride-`8` retained
+  diagnostics, and `8` trajectory checkpoints.
+- The report includes tail and minimum data misfit versus the nominal
+  `N_obs / 2` noise floor, posterior-mean relative-k trajectories versus
+  updates and forward solves, endpoint and best achieved maximum `R_hat`,
+  conservative ESS, coverage, solve counts, wall time, ESS per `1000` solves,
+  and ESS per second.
+- Verdicts are deliberately gated. A data-limited conclusion requires both
+  schemes to converge, reach the noise floor, approach similar recovery
+  floors, and show calibrated coverage. A conditioning-defect conclusion
+  requires converged evidence that red-black fails data fit, plateaus
+  materially above global pCN, or has materially worse coverage. Otherwise
+  the report remains ambiguous and states the budget condition needed to
+  resolve it.
+- The observed opt-in decision run completed both requested budgets before the
+  cap: `8000` red-black local updates per chain and `10000` global-pCN
+  proposals per chain. Red-black posterior-mean relative-k error was `0.5415`
+  and remained descending over its final checkpoint window
+  (`0.5641 -> 0.5570 -> 0.5489 -> 0.5415`). Global pCN relative-k error was
+  `0.6302` and plateaued over its final window
+  (`0.6357 -> 0.6328 -> 0.6312 -> 0.6302`).
+- Neither scheme reached the nominal data-misfit floor `32`. Red-black tail
+  mean/minimum misfit were `88.086 / 67.893`; global-pCN values were
+  `59.471 / 46.783`. Central `90%` log-field interval coverages were `0.972`
+  and `0.612`.
+- Neither scheme converged. Endpoint/best achieved maximum `R_hat` values were
+  `6.871 / 6.553` for red-black and `3.792 / 3.792` for global pCN.
+  Conservative total ESS values were `14.59` and `14.13`.
+- Red-black used `32008` forward solves and `517.11` wall-seconds versus
+  global pCN `40004` solves and `557.76` wall-seconds. Conservative ESS per
+  `1000` solves were `0.456` and `0.353`; ESS per second were `0.028` and
+  `0.025`.
+- The evidence remains ambiguous rather than supporting either requested
+  terminal verdict. Red-black is not recovering worse in this matched-start
+  run: its posterior-mean relative-k is lower and still descending, while it
+  is preliminarily more compute-efficient. But both data fits remain above
+  the noise floor and neither `R_hat` is close to `1.05`; coverage also differs
+  sharply. To resolve the question, increase caps and budgets until both
+  endpoint maximum `R_hat` values are at most `1.05` and the last two
+  relative-k checkpoint intervals are stable, then apply the same
+  noise-floor, recovery-gap, and coverage criteria.
