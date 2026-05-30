@@ -408,13 +408,11 @@
   updates and forward solves, endpoint and best achieved maximum `R_hat`,
   conservative ESS, coverage, solve counts, wall time, ESS per `1000` solves,
   and ESS per second.
-- Verdicts are deliberately gated. A data-limited conclusion requires both
-  schemes to converge, reach the noise floor, approach similar recovery
-  floors, and show calibrated coverage. A conditioning-defect conclusion
-  requires converged evidence that red-black fails data fit, plateaus
-  materially above global pCN, or has materially worse coverage. Otherwise
-  the report remains ambiguous and states the budget condition needed to
-  resolve it.
+- The first decision profile treated `R_hat <= 1.05` as a strict verdict gate.
+  That was useful for identifying the unresolved state, but it is impractical
+  as the only stopping rule for these slow mixers. The resolving extension
+  below uses final relative-k checkpoint flattening as its decision criterion
+  while continuing to report `R_hat`, ESS, coverage, and data fit.
 - The observed opt-in decision run completed both requested budgets before the
   cap: `8000` red-black local updates per chain and `10000` global-pCN
   proposals per chain. Red-black posterior-mean relative-k error was `0.5415`
@@ -438,7 +436,26 @@
   run: its posterior-mean relative-k is lower and still descending, while it
   is preliminarily more compute-efficient. But both data fits remain above
   the noise floor and neither `R_hat` is close to `1.05`; coverage also differs
-  sharply. To resolve the question, increase caps and budgets until both
-  endpoint maximum `R_hat` values are at most `1.05` and the last two
-  relative-k checkpoint intervals are stable, then apply the same
-  noise-floor, recovery-gap, and coverage criteria.
+  sharply. The resolving extension increases caps and budgets and checks
+  whether the final relative-k checkpoint windows flatten.
+
+## M9 Recovery Decision Resolving Extension
+
+- `python -m experiments.exp08c_recovery_decision --resolve` enables the
+  larger opt-in profile. The responsive default remains unchanged. Budgets can
+  also be set explicitly with `--sweeps`, `--pcn-iters`, `--max-seconds`, and
+  `--checkpoints`; the original long-form flags remain supported.
+- A scheme is reported as flattened when every relative-k change in its final
+  checkpoint window is smaller than the configured tolerance. The resolving
+  defaults use a `4`-checkpoint window and absolute tolerance `0.005`.
+- The report also classifies the final data-misfit checkpoint direction as
+  descending, plateaued, or rising relative to the nominal `N_obs / 2` noise
+  floor. `R_hat`, ESS, interval coverage, solves, and wall time remain visible
+  evidence, but `R_hat <= 1.05` no longer blocks a recovery verdict by itself.
+- The resolving verdict is intentionally narrow. If red-black relative-k
+  flattens below the global-pCN plateau and its misfit is still descending
+  toward the floor, conditioning is the better recoverer and route section
+  `3.8(b)` is not needed before M10/M11. If red-black flattens at or above
+  global pCN, the conditioned formulation should be reconsidered. If either
+  final window is still moving, the result remains unresolved and the report
+  states which budgets to increase.

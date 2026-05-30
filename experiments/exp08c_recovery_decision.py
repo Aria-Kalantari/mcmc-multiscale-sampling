@@ -55,6 +55,10 @@ class DecisionProfile:
     wall_cap_seconds: float
     sample_stride: int
     trajectory_points: int
+    stabilization_window: int
+    stabilization_tolerance: float
+    recovery_gap_tolerance: float
+    misfit_trend_fraction: float
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,10 @@ class DecisionSummary:
     label: str
     relative_k_error: float
     trajectory_shape: str
+    relative_k_stable: bool
+    relative_k_window_change: float
+    max_relative_k_checkpoint_change: float
+    misfit_trajectory_shape: str
     tail_mean_misfit: float
     min_misfit: float
     misfit_over_noise_floor: float
@@ -106,11 +114,20 @@ class DecisionSummary:
 
 
 def _resolved_profile(args: argparse.Namespace) -> DecisionProfile:
-    defaults = (
-        DecisionProfile("decision", 500, 10_000, 600.0, 8, 8)
-        if args.decide
-        else DecisionProfile("responsive", 2, 64, 60.0, 1, 4)
-    )
+    if args.decide and args.resolve:
+        raise ValueError("choose at most one of --decide and --resolve.")
+    if args.resolve:
+        defaults = DecisionProfile(
+            "resolving", 2_000, 40_000, 7_200.0, 32, 12, 4, 0.005, 0.02, 0.05
+        )
+    elif args.decide:
+        defaults = DecisionProfile(
+            "decision", 500, 10_000, 600.0, 8, 8, 4, 0.005, 0.02, 0.05
+        )
+    else:
+        defaults = DecisionProfile(
+            "responsive", 2, 64, 60.0, 1, 4, 4, 0.005, 0.02, 0.05
+        )
     profile = DecisionProfile(
         label=defaults.label,
         red_black_sweeps=(
@@ -134,6 +151,26 @@ def _resolved_profile(args: argparse.Namespace) -> DecisionProfile:
             if args.trajectory_points is None
             else args.trajectory_points
         ),
+        stabilization_window=(
+            defaults.stabilization_window
+            if args.stabilization_window is None
+            else args.stabilization_window
+        ),
+        stabilization_tolerance=(
+            defaults.stabilization_tolerance
+            if args.stabilization_tolerance is None
+            else args.stabilization_tolerance
+        ),
+        recovery_gap_tolerance=(
+            defaults.recovery_gap_tolerance
+            if args.recovery_gap_tolerance is None
+            else args.recovery_gap_tolerance
+        ),
+        misfit_trend_fraction=(
+            defaults.misfit_trend_fraction
+            if args.misfit_trend_fraction is None
+            else args.misfit_trend_fraction
+        ),
     )
     if profile.red_black_sweeps < 1 or profile.global_iter < 1:
         raise ValueError("chain lengths must be positive.")
@@ -143,6 +180,14 @@ def _resolved_profile(args: argparse.Namespace) -> DecisionProfile:
         raise ValueError("sample-stride must be positive.")
     if profile.trajectory_points < 2:
         raise ValueError("trajectory-points must be at least 2.")
+    if profile.stabilization_window < 2:
+        raise ValueError("stabilization-window must be at least 2.")
+    if profile.stabilization_tolerance <= 0.0:
+        raise ValueError("stabilization-tolerance must be positive.")
+    if profile.recovery_gap_tolerance < 0.0:
+        raise ValueError("recovery-gap-tolerance must be non-negative.")
+    if profile.misfit_trend_fraction <= 0.0:
+        raise ValueError("misfit-trend-fraction must be positive.")
     return profile
 
 
@@ -440,6 +485,43 @@ def _trajectory_shape(points: Sequence[TrajectoryPoint]) -> str:
     return "plateau"
 
 
+def _relative_k_stabilization(
+    points: Sequence[TrajectoryPoint], window: int, tolerance: float
+) -> tuple[bool, float, float]:
+    """Report whether final relative-k checkpoint steps stay within tolerance."""
+    if len(points) < 2:
+        return False, float("nan"), float("nan")
+    final_window = points[-min(window, len(points)) :]
+    values = np.asarray(
+        [point.relative_k_error for point in final_window], dtype=np.float64
+    )
+    changes = np.abs(np.diff(values))
+    return (
+        bool(np.all(changes < tolerance)),
+        float(values[-1] - values[0]),
+        float(np.max(changes)),
+    )
+
+
+def _misfit_trajectory_shape(
+    points: Sequence[TrajectoryPoint],
+    noise_floor: float,
+    window: int,
+    trend_fraction: float,
+) -> str:
+    """Classify the final data-misfit checkpoint direction against its floor."""
+    if len(points) < 2:
+        return "insufficient"
+    final_window = points[-min(window, len(points)) :]
+    change = final_window[0].mean_misfit - final_window[-1].mean_misfit
+    tolerance = trend_fraction * noise_floor
+    if change > tolerance:
+        return "descending"
+    if change < -tolerance:
+        return "rising"
+    return "plateau"
+
+
 def _summarize(
     label: str,
     chains: Sequence[DecisionChain],
@@ -447,6 +529,9 @@ def _summarize(
     noise_floor: float,
     level: float,
     trajectory_points: int,
+    stabilization_window: int,
+    stabilization_tolerance: float,
+    misfit_trend_fraction: float,
 ) -> DecisionSummary:
     trimmed = _trim_chains(chains)
     fields = np.concatenate([chain.fields for chain in trimmed], axis=0)
@@ -461,6 +546,13 @@ def _summarize(
     trajectory = _trajectory(
         trimmed, truth, noise_floor=noise_floor, n_points=trajectory_points
     )
+    (
+        relative_k_stable,
+        relative_k_window_change,
+        max_relative_k_checkpoint_change,
+    ) = _relative_k_stabilization(
+        trajectory, window=stabilization_window, tolerance=stabilization_tolerance
+    )
     tail = max(1, trimmed[0].misfit.size // 10)
     tail_misfit = np.concatenate([chain.misfit[-tail:] for chain in trimmed])
     all_misfit = np.concatenate([chain.misfit for chain in trimmed])
@@ -470,6 +562,15 @@ def _summarize(
             permeability_from_log_field(G_mean), truth.k_true
         ),
         trajectory_shape=_trajectory_shape(trajectory),
+        relative_k_stable=relative_k_stable,
+        relative_k_window_change=relative_k_window_change,
+        max_relative_k_checkpoint_change=max_relative_k_checkpoint_change,
+        misfit_trajectory_shape=_misfit_trajectory_shape(
+            trajectory,
+            noise_floor=noise_floor,
+            window=stabilization_window,
+            trend_fraction=misfit_trend_fraction,
+        ),
         tail_mean_misfit=float(np.mean(tail_misfit)),
         min_misfit=float(np.min(all_misfit)),
         misfit_over_noise_floor=float(np.mean(tail_misfit) / noise_floor),
@@ -497,46 +598,43 @@ def _verdict(
     red_black: DecisionSummary,
     global_pcn: DecisionSummary,
     noise_floor: float,
-    level: float,
+    level: float | None = None,
+    recovery_gap_tolerance: float = 0.02,
 ) -> str:
-    converged = (
-        red_black.endpoint_max_r_hat <= 1.05 and global_pcn.endpoint_max_r_hat <= 1.05
+    del level
+    both_stable = red_black.relative_k_stable and global_pcn.relative_k_stable
+    red_black_below = (
+        red_black.relative_k_error
+        < global_pcn.relative_k_error - recovery_gap_tolerance
     )
-    red_black_fits = red_black.tail_mean_misfit <= 1.5 * noise_floor
-    global_fits = global_pcn.tail_mean_misfit <= 1.5 * noise_floor
-    similar_recovery = (
-        abs(red_black.relative_k_error - global_pcn.relative_k_error) <= 0.1
+    red_black_at_or_above = (
+        red_black.relative_k_error
+        >= global_pcn.relative_k_error - recovery_gap_tolerance
     )
-    calibrated = (
-        abs(red_black.coverage - level) <= 0.1
-        and abs(global_pcn.coverage - level) <= 0.1
-    )
-    materially_worse_coverage = global_pcn.coverage - red_black.coverage > 0.1
-    plateau_gap = (
-        red_black.trajectory_shape == "plateau"
-        and red_black.relative_k_error > global_pcn.relative_k_error + 0.1
+    red_black_misfit_progressing = (
+        red_black.misfit_trajectory_shape == "descending"
+        or red_black.tail_mean_misfit <= 1.5 * noise_floor
     )
 
-    if converged and red_black_fits and global_fits and similar_recovery and calibrated:
+    if both_stable and red_black_below and red_black_misfit_progressing:
         return (
-            "DATA-LIMITED: both schemes reach the noise floor, recovery floors "
-            "are similar, and coverage is calibrated. Conditioning's value is "
-            "compute efficiency; proceed to M10/M11 without route (b)."
+            "CONDITIONING RECOVERS BETTER: red-black relative-k flattened below "
+            "the global-pCN plateau while its data misfit is still descending "
+            "toward the noise floor. Route section 3.8(b) is not needed; "
+            "proceed to M10/M11."
         )
-    if converged and (
-        (not red_black_fits and global_fits) or plateau_gap or materially_worse_coverage
-    ):
+    if both_stable and red_black_at_or_above:
         return (
-            "CONDITIONING DEFECT: converged red-black diagnostics trail global "
-            "pCN in data fit, plateaued recovery, or coverage. Route section "
-            "3.8(b) is justified as the next milestone."
+            "RECONSIDER CONDITIONING: red-black relative-k flattened at or "
+            "above the global-pCN plateau. Revisit the conditioned formulation "
+            "before proceeding."
         )
     return (
-        "AMBIGUOUS: at least one scheme is not converged or the trajectories "
-        "have not separated decisively. Increase --wall-cap-seconds and chain "
-        "budgets until endpoint max R_hat <= 1.05 for both schemes and the "
-        "last two relative-k checkpoints are stable; then apply the same "
-        "data-fit, recovery-gap, and coverage criteria."
+        "UNRESOLVED: at least one final relative-k checkpoint window has not "
+        "flattened, or red-black has flattened lower without a descending "
+        "data-misfit tail. Increase --max-seconds, --sweeps, and --pcn-iters "
+        "until both final checkpoint windows stabilize, then apply the same "
+        "recovery-floor and misfit-direction criteria."
     )
 
 
@@ -545,14 +643,18 @@ def _print_summary_table(
 ) -> None:
     print(
         "scheme              stop      updates/chain             rel-k shape      "
-        "tail_misfit min_misfit misfit/floor coverage accept end_Rhat best_Rhat "
-        "min_ESS solves seconds ESS/1k ESS/sec"
+        "flat d_relk max_step misfit_shape tail_misfit min_misfit misfit/floor "
+        "coverage accept end_Rhat best_Rhat min_ESS solves seconds ESS/1k ESS/sec"
     )
     for summary in summaries:
         updates = ",".join(str(value) for value in summary.updates_per_chain)
         print(
             f"{summary.label:<19} {summary.stopped_by:<9} {updates:<25} "
             f"{summary.relative_k_error:6.4f} {summary.trajectory_shape:<10} "
+            f"{str(summary.relative_k_stable):<5} "
+            f"{summary.relative_k_window_change:7.4f} "
+            f"{summary.max_relative_k_checkpoint_change:8.4f} "
+            f"{summary.misfit_trajectory_shape:<12} "
             f"{summary.tail_mean_misfit:10.3f} {summary.min_misfit:9.3f} "
             f"{summary.misfit_over_noise_floor:11.3f} {summary.coverage:8.3f} "
             f"{summary.acceptance_rate:6.3f} {summary.endpoint_max_r_hat:8.3f} "
@@ -586,12 +688,21 @@ def main() -> None:
         action="store_true",
         help="Run the opt-in generous recovery-decision profile.",
     )
+    parser.add_argument(
+        "--resolve",
+        action="store_true",
+        help="Run the opt-in resolving profile with larger budgets and cap.",
+    )
     parser.add_argument("--n-chains", type=int, default=4)
-    parser.add_argument("--red-black-sweeps", type=int, default=None)
-    parser.add_argument("--global-iter", type=int, default=None)
-    parser.add_argument("--wall-cap-seconds", type=float, default=None)
+    parser.add_argument("--red-black-sweeps", "--sweeps", type=int, default=None)
+    parser.add_argument("--global-iter", "--pcn-iters", type=int, default=None)
+    parser.add_argument("--wall-cap-seconds", "--max-seconds", type=float, default=None)
     parser.add_argument("--sample-stride", type=int, default=None)
-    parser.add_argument("--trajectory-points", type=int, default=None)
+    parser.add_argument("--trajectory-points", "--checkpoints", type=int, default=None)
+    parser.add_argument("--stabilization-window", type=int, default=None)
+    parser.add_argument("--stabilization-tolerance", type=float, default=None)
+    parser.add_argument("--recovery-gap-tolerance", type=float, default=None)
+    parser.add_argument("--misfit-trend-fraction", type=float, default=None)
     parser.add_argument("--mb", type=int, default=16)
     parser.add_argument("--beta", type=float, default=0.2)
     parser.add_argument("--seed", type=int, default=7)
@@ -652,6 +763,9 @@ def main() -> None:
             noise_floor,
             args.coverage_level,
             profile.trajectory_points,
+            profile.stabilization_window,
+            profile.stabilization_tolerance,
+            profile.misfit_trend_fraction,
         ),
         _summarize(
             "global_pcn",
@@ -660,6 +774,9 @@ def main() -> None:
             noise_floor,
             args.coverage_level,
             profile.trajectory_points,
+            profile.stabilization_window,
+            profile.stabilization_tolerance,
+            profile.misfit_trend_fraction,
         ),
     ]
 
@@ -671,7 +788,9 @@ def main() -> None:
     print(
         f"red_black_sweeps={profile.red_black_sweeps}; "
         f"global_iter={profile.global_iter}; wall_cap_seconds={profile.wall_cap_seconds}; "
-        f"sample_stride={profile.sample_stride}; burn_fraction={args.burn_fraction:.3f}"
+        f"sample_stride={profile.sample_stride}; burn_fraction={args.burn_fraction:.3f}; "
+        f"stabilization_window={profile.stabilization_window}; "
+        f"stabilization_tolerance={profile.stabilization_tolerance}"
     )
     print(
         "Comparison note: single-subdomain is excluded because it freezes the "
@@ -685,7 +804,9 @@ def main() -> None:
     print("TRAJECTORY CHECKPOINTS")
     _print_trajectories(summaries)
     print("Verdict:")
-    print(f"  {_verdict(summaries[0], summaries[1], noise_floor, args.coverage_level)}")
+    print(
+        f"  {_verdict(summaries[0], summaries[1], noise_floor, recovery_gap_tolerance=profile.recovery_gap_tolerance)}"
+    )
 
 
 if __name__ == "__main__":

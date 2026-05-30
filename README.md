@@ -75,6 +75,19 @@ This excludes the structurally frozen single-subdomain harness from the
 recovery verdict and reports whether the requested proposal budget or wall cap
 ended each scheme.
 
+For the resolving comparison, use the larger opt-in profile:
+
+```bash
+python -m experiments.exp08c_recovery_decision --resolve
+```
+
+The resolving report classifies the final relative-k checkpoint windows as
+flattened or still moving, reports whether each data-misfit tail is descending
+toward the noise floor, and keeps R-hat, ESS, coverage, solve counts, and wall
+time visible as supporting diagnostics. Budgets remain configurable with
+`--sweeps`, `--pcn-iters`, `--max-seconds`, and `--checkpoints`; the fast
+default command remains unchanged.
+
 ## Dashboard
 
 ```bash
