@@ -43,8 +43,11 @@ python -m experiments.exp08c_recovery_decision
 
 ## Acceptance Modes
 
-`Config.acceptance` defaults to `posterior`. The M8 posterior baseline adds a
-projected global-KLE field prior and the hard-null pCN proposal correction.
+`Config.acceptance` defaults to `posterior`, and `Config.prior_mode` defaults
+to `global_field`. The M8 posterior baseline adds a projected global-KLE field
+prior and the hard-null pCN proposal correction. A diagnostic
+`prior_mode="null_space"` variant instead applies the reference-style local
+null-coordinate prior ratio without the canceling pCN proposal correction.
 The low-level conditioned samplers retain an explicit `likelihood_only` mode so
 the M4/M5 instability studies remain reproducible. `exp07_posterior_recovery`
 compares both modes for single-subdomain and red-black updates.
@@ -81,12 +84,22 @@ For the resolving comparison, use the larger opt-in profile:
 python -m experiments.exp08c_recovery_decision --resolve
 ```
 
-The resolving report classifies the final relative-k checkpoint windows as
+The resolving report compares the M8 global-field prior, the diagnostic
+null-space-prior variant, and global pCN. It classifies final relative-k
+checkpoint windows as
 flattened or still moving, reports whether each data-misfit tail is descending
 toward the noise floor, and keeps R-hat, ESS, coverage, solve counts, and wall
-time visible as supporting diagnostics. Budgets remain configurable with
+time visible as supporting diagnostics. Conditioned rows also report accepted
+local coefficient, null-coordinate, and particular-solution norms. Budgets
+remain configurable with
 `--sweeps`, `--pcn-iters`, `--max-seconds`, and `--checkpoints`; the fast
 default command remains unchanged.
+
+The resolving diagnostic currently finds that the M8 global-field path
+develops local null-coordinate growth as its recovery error reverses. The
+reference-style null-space penalty bounds those coordinates but does not stop
+the field-error reversal. It is retained as a diagnostic variant, not presented
+as a completed conditioned-posterior fix.
 
 ## Dashboard
 

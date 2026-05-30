@@ -32,6 +32,12 @@ def _summary(
         relative_k_window_change=0.0,
         max_relative_k_checkpoint_change=0.0,
         misfit_trajectory_shape=misfit_trajectory_shape,
+        final_accepted_state_theta_norm=5.0,
+        max_accepted_state_theta_norm=6.0,
+        final_null_space_norm=4.0,
+        max_null_space_norm=5.0,
+        mean_theta_p_norm=3.0,
+        max_theta_p_norm=4.0,
         tail_mean_misfit=tail_mean_misfit,
         min_misfit=tail_mean_misfit,
         misfit_over_noise_floor=tail_mean_misfit / 32.0,
@@ -231,4 +237,28 @@ def test_verdict_reconsiders_conditioning_for_flattened_recovery_gap() -> None:
 
     assert _verdict(red_black, global_pcn, noise_floor=32.0, level=0.9).startswith(
         "RECONSIDER CONDITIONING"
+    )
+
+
+def test_verdict_reports_null_space_prior_insufficient_after_reversal() -> None:
+    red_black = _summary(
+        "rb_null_space",
+        relative_k_error=0.82,
+        tail_mean_misfit=100.0,
+        coverage=1.0,
+        endpoint_max_r_hat=2.3,
+        trajectory_shape="rising",
+        relative_k_stable=False,
+        misfit_trajectory_shape="rising",
+    )
+    global_pcn = _summary(
+        "global_pcn",
+        relative_k_error=0.61,
+        tail_mean_misfit=42.0,
+        coverage=0.7,
+        endpoint_max_r_hat=3.1,
+    )
+
+    assert _verdict(red_black, global_pcn, noise_floor=32.0, level=0.9).startswith(
+        "NULL-SPACE PRIOR INSUFFICIENT"
     )

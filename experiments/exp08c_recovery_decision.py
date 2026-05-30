@@ -67,6 +67,9 @@ class DecisionChain:
     misfit: np.ndarray
     coefficients: np.ndarray
     theta_norm: np.ndarray
+    accepted_state_theta_norm: np.ndarray
+    null_space_norm: np.ndarray
+    theta_p_norm: np.ndarray
     sample_updates: np.ndarray
     sample_solves: np.ndarray
     acceptance_rate: float
@@ -84,6 +87,9 @@ class TrajectoryPoint:
     mean_misfit: float
     misfit_over_noise_floor: float
     max_r_hat: float
+    mean_accepted_state_theta_norm: float = np.nan
+    mean_null_space_norm: float = np.nan
+    mean_theta_p_norm: float = np.nan
 
 
 @dataclass(frozen=True)
@@ -95,6 +101,12 @@ class DecisionSummary:
     relative_k_window_change: float
     max_relative_k_checkpoint_change: float
     misfit_trajectory_shape: str
+    final_accepted_state_theta_norm: float
+    max_accepted_state_theta_norm: float
+    final_null_space_norm: float
+    max_null_space_norm: float
+    mean_theta_p_norm: float
+    max_theta_p_norm: float
     tail_mean_misfit: float
     min_misfit: float
     misfit_over_noise_floor: float
@@ -202,6 +214,9 @@ def _consume_states(
 ) -> tuple[
     list[np.ndarray],
     list[float],
+    list[float],
+    list[float],
+    list[float],
     list[int],
     list[int],
     list[bool],
@@ -212,21 +227,40 @@ def _consume_states(
     burn = int(max_updates * burn_fraction)
     fields: list[np.ndarray] = []
     misfit: list[float] = []
+    accepted_state_theta_norm: list[float] = []
+    null_space_norm: list[float] = []
+    theta_p_norm: list[float] = []
     sample_updates: list[int] = []
     sample_solves: list[int] = []
     accepted: list[bool] = []
-    last_sample: tuple[np.ndarray, float, int] | None = None
+    last_sample: tuple[np.ndarray, float, float, float, float, int] | None = None
     started = perf_counter()
 
     for idx, state in enumerate(states, start=1):
         accepted.append(state.accepted)
         if idx > burn:
-            field, state_misfit = field_and_misfit(state)
-            sample = (field, state_misfit, idx + solve_offset)
+            (
+                field,
+                state_misfit,
+                state_theta_norm,
+                state_null_space_norm,
+                state_theta_p_norm,
+            ) = field_and_misfit(state)
+            sample = (
+                field,
+                state_misfit,
+                state_theta_norm,
+                state_null_space_norm,
+                state_theta_p_norm,
+                idx + solve_offset,
+            )
             last_sample = sample
             if (idx - burn - 1) % sample_stride == 0:
                 fields.append(field)
                 misfit.append(state_misfit)
+                accepted_state_theta_norm.append(state_theta_norm)
+                null_space_norm.append(state_null_space_norm)
+                theta_p_norm.append(state_theta_p_norm)
                 sample_updates.append(idx)
                 sample_solves.append(idx + solve_offset)
         if perf_counter() - started >= wall_cap_seconds:
@@ -242,14 +276,20 @@ def _consume_states(
             "wall cap stopped a chain before burn-in completed; increase the cap "
             "or reduce the requested budget."
         )
-    if not sample_solves or sample_solves[-1] != last_sample[2]:
+    if not sample_solves or sample_solves[-1] != last_sample[5]:
         fields.append(last_sample[0])
         misfit.append(last_sample[1])
-        sample_updates.append(last_sample[2] - solve_offset)
-        sample_solves.append(last_sample[2])
+        accepted_state_theta_norm.append(last_sample[2])
+        null_space_norm.append(last_sample[3])
+        theta_p_norm.append(last_sample[4])
+        sample_updates.append(last_sample[5] - solve_offset)
+        sample_solves.append(last_sample[5])
     return (
         fields,
         misfit,
+        accepted_state_theta_norm,
+        null_space_norm,
+        theta_p_norm,
         sample_updates,
         sample_solves,
         accepted,
@@ -262,6 +302,9 @@ def _consume_states(
 def _finish_chain(
     fields: list[np.ndarray],
     misfit: list[float],
+    accepted_state_theta_norm: list[float],
+    null_space_norm: list[float],
+    theta_p_norm: list[float],
     sample_updates: list[int],
     sample_solves: list[int],
     accepted: list[bool],
@@ -279,6 +322,11 @@ def _finish_chain(
         misfit=np.asarray(misfit, dtype=np.float64),
         coefficients=coefficients,
         theta_norm=np.linalg.norm(coefficients, axis=1),
+        accepted_state_theta_norm=np.asarray(
+            accepted_state_theta_norm, dtype=np.float64
+        ),
+        null_space_norm=np.asarray(null_space_norm, dtype=np.float64),
+        theta_p_norm=np.asarray(theta_p_norm, dtype=np.float64),
         sample_updates=np.asarray(sample_updates, dtype=np.int64),
         sample_solves=np.asarray(sample_solves, dtype=np.int64),
         acceptance_rate=float(np.mean(accepted)),
@@ -302,6 +350,7 @@ def _red_black_chain(
     burn_fraction: float,
     sample_stride: int,
     wall_cap_seconds: float,
+    prior_mode: str,
 ) -> DecisionChain:
     n_subdomains = cfg.n_coarse_x * cfg.n_coarse_y
     rng = _TruthReplayGenerator(
@@ -319,10 +368,19 @@ def _red_black_chain(
         rng=rng,  # type: ignore[arg-type]
         beta=beta,
         acceptance="posterior",
+        prior_mode=prior_mode,
     )
 
-    def field_and_misfit(state: RedBlackSamplerState) -> tuple[np.ndarray, float]:
-        return state.G_accepted.copy(), -state.log_likelihood_accepted
+    def field_and_misfit(
+        state: RedBlackSamplerState,
+    ) -> tuple[np.ndarray, float, float, float, float]:
+        return (
+            state.G_accepted.copy(),
+            -state.log_likelihood_accepted,
+            state.theta_norm_accepted,
+            state.null_space_norm_accepted,
+            state.theta_p_norm,
+        )
 
     consumed = _consume_states(
         states=states,
@@ -373,9 +431,17 @@ def _global_pcn_chain(
         log_prior_fn=log_prior,
     )
 
-    def field_and_misfit(state: MCMCState) -> tuple[np.ndarray, float]:
+    def field_and_misfit(
+        state: MCMCState,
+    ) -> tuple[np.ndarray, float, float, float, float]:
         field = reshape_field(field_from_theta(Phi, lam, state.theta), cfg.ny, cfg.nx)
-        return field, -(state.log_density - log_prior(state.theta))
+        return (
+            field,
+            -(state.log_density - log_prior(state.theta)),
+            float(np.linalg.norm(state.theta)),
+            np.nan,
+            np.nan,
+        )
 
     consumed = _consume_states(
         states=states,
@@ -399,6 +465,9 @@ def _trim_chains(chains: Sequence[DecisionChain]) -> tuple[DecisionChain, ...]:
             misfit=chain.misfit[:min_samples],
             coefficients=chain.coefficients[:min_samples],
             theta_norm=chain.theta_norm[:min_samples],
+            accepted_state_theta_norm=chain.accepted_state_theta_norm[:min_samples],
+            null_space_norm=chain.null_space_norm[:min_samples],
+            theta_p_norm=chain.theta_p_norm[:min_samples],
             sample_updates=chain.sample_updates[:min_samples],
             sample_solves=chain.sample_solves[:min_samples],
             acceptance_rate=chain.acceptance_rate,
@@ -429,6 +498,14 @@ def _scalar_summaries(
         for idx in range(min(3, chains[0].coefficients.shape[1]))
     )
     return tuple(values)
+
+
+def _nan_mean(values: np.ndarray) -> float:
+    return float(np.nan) if np.all(np.isnan(values)) else float(np.nanmean(values))
+
+
+def _nan_max(values: np.ndarray) -> float:
+    return float(np.nan) if np.all(np.isnan(values)) else float(np.nanmax(values))
 
 
 def _trajectory(
@@ -468,6 +545,27 @@ def _trajectory(
                     / noise_floor
                 ),
                 max_r_hat=max(summary.r_hat for summary in scalar_summaries),
+                mean_accepted_state_theta_norm=_nan_mean(
+                    np.asarray(
+                        [
+                            chain.accepted_state_theta_norm[prefix - 1]
+                            for chain in chains
+                        ],
+                        dtype=np.float64,
+                    )
+                ),
+                mean_null_space_norm=_nan_mean(
+                    np.asarray(
+                        [chain.null_space_norm[prefix - 1] for chain in chains],
+                        dtype=np.float64,
+                    )
+                ),
+                mean_theta_p_norm=_nan_mean(
+                    np.asarray(
+                        [chain.theta_p_norm[prefix - 1] for chain in chains],
+                        dtype=np.float64,
+                    )
+                ),
             )
         )
     return tuple(points)
@@ -556,6 +654,11 @@ def _summarize(
     tail = max(1, trimmed[0].misfit.size // 10)
     tail_misfit = np.concatenate([chain.misfit[-tail:] for chain in trimmed])
     all_misfit = np.concatenate([chain.misfit for chain in trimmed])
+    accepted_state_theta_norm = np.concatenate(
+        [chain.accepted_state_theta_norm for chain in trimmed]
+    )
+    null_space_norm = np.concatenate([chain.null_space_norm for chain in trimmed])
+    theta_p_norm = np.concatenate([chain.theta_p_norm for chain in trimmed])
     return DecisionSummary(
         label=label,
         relative_k_error=relative_error(
@@ -571,6 +674,21 @@ def _summarize(
             window=stabilization_window,
             trend_fraction=misfit_trend_fraction,
         ),
+        final_accepted_state_theta_norm=_nan_mean(
+            np.asarray(
+                [chain.accepted_state_theta_norm[-1] for chain in trimmed],
+                dtype=np.float64,
+            )
+        ),
+        max_accepted_state_theta_norm=_nan_max(accepted_state_theta_norm),
+        final_null_space_norm=_nan_mean(
+            np.asarray(
+                [chain.null_space_norm[-1] for chain in trimmed], dtype=np.float64
+            )
+        ),
+        max_null_space_norm=_nan_max(null_space_norm),
+        mean_theta_p_norm=_nan_mean(theta_p_norm),
+        max_theta_p_norm=_nan_max(theta_p_norm),
         tail_mean_misfit=float(np.mean(tail_misfit)),
         min_misfit=float(np.min(all_misfit)),
         misfit_over_noise_floor=float(np.mean(tail_misfit) / noise_floor),
@@ -616,6 +734,13 @@ def _verdict(
         or red_black.tail_mean_misfit <= 1.5 * noise_floor
     )
 
+    if red_black.trajectory_shape == "rising" and global_pcn.relative_k_stable:
+        return (
+            "NULL-SPACE PRIOR INSUFFICIENT: the diagnostic bounds local "
+            "null-coordinate norms but red-black relative-k still reverses "
+            "while global pCN plateaus. Record this for the conditioned-prior "
+            "derivation; do not force a positive recovery conclusion."
+        )
     if both_stable and red_black_below and red_black_misfit_progressing:
         return (
             "CONDITIONING RECOVERS BETTER: red-black relative-k flattened below "
@@ -644,7 +769,8 @@ def _print_summary_table(
     print(
         "scheme              stop      updates/chain             rel-k shape      "
         "flat d_relk max_step misfit_shape tail_misfit min_misfit misfit/floor "
-        "coverage accept end_Rhat best_Rhat min_ESS solves seconds ESS/1k ESS/sec"
+        "coverage accept stateN nullN nullMax thetaP end_Rhat best_Rhat min_ESS "
+        "solves seconds ESS/1k ESS/sec"
     )
     for summary in summaries:
         updates = ",".join(str(value) for value in summary.updates_per_chain)
@@ -657,7 +783,11 @@ def _print_summary_table(
             f"{summary.misfit_trajectory_shape:<12} "
             f"{summary.tail_mean_misfit:10.3f} {summary.min_misfit:9.3f} "
             f"{summary.misfit_over_noise_floor:11.3f} {summary.coverage:8.3f} "
-            f"{summary.acceptance_rate:6.3f} {summary.endpoint_max_r_hat:8.3f} "
+            f"{summary.acceptance_rate:6.3f} "
+            f"{summary.final_accepted_state_theta_norm:6.2f} "
+            f"{summary.final_null_space_norm:5.2f} "
+            f"{summary.max_null_space_norm:7.2f} {summary.mean_theta_p_norm:6.2f} "
+            f"{summary.endpoint_max_r_hat:8.3f} "
             f"{summary.best_max_r_hat:9.3f} {summary.conservative_total_ess:7.2f} "
             f"{summary.total_forward_solves:6d} {summary.wall_seconds:7.2f} "
             f"{summary.ess_per_1000_solves:6.3f} {summary.ess_per_second:7.3f}"
@@ -668,7 +798,7 @@ def _print_summary_table(
 def _print_trajectories(summaries: Sequence[DecisionSummary]) -> None:
     print(
         "scheme              updates/chain solves rel-k(mean G) mean_misfit "
-        "misfit/floor max_Rhat"
+        "misfit/floor state_norm null_norm theta_p max_Rhat"
     )
     for summary in summaries:
         for point in summary.trajectory:
@@ -676,7 +806,9 @@ def _print_trajectories(summaries: Sequence[DecisionSummary]) -> None:
                 f"{summary.label:<19} {point.mean_updates_per_chain:13.1f} "
                 f"{point.total_forward_solves:6d} {point.relative_k_error:13.4e} "
                 f"{point.mean_misfit:11.3f} {point.misfit_over_noise_floor:11.3f} "
-                f"{point.max_r_hat:8.3f}"
+                f"{point.mean_accepted_state_theta_norm:10.3f} "
+                f"{point.mean_null_space_norm:9.3f} "
+                f"{point.mean_theta_p_norm:7.3f} {point.max_r_hat:8.3f}"
             )
         print()
 
@@ -723,7 +855,7 @@ def main() -> None:
     per_chain_cap = profile.wall_cap_seconds / args.n_chains
     noise_floor = 0.5 * cfg.n_obs_x * cfg.n_obs_y
 
-    red_black = [
+    red_black_global_field = [
         _red_black_chain(
             cfg=cfg,
             truth_draw=theta_true_draw,
@@ -737,6 +869,25 @@ def main() -> None:
             burn_fraction=args.burn_fraction,
             sample_stride=profile.sample_stride,
             wall_cap_seconds=per_chain_cap,
+            prior_mode="global_field",
+        )
+        for chain_seed in seeds
+    ]
+    red_black_null_space = [
+        _red_black_chain(
+            cfg=cfg,
+            truth_draw=theta_true_draw,
+            noise_draw=noise_draw,
+            Phi=Phi,
+            lam=lam,
+            chain_seed=chain_seed,
+            n_sweeps=profile.red_black_sweeps,
+            Mb=args.mb,
+            beta=args.beta,
+            burn_fraction=args.burn_fraction,
+            sample_stride=profile.sample_stride,
+            wall_cap_seconds=per_chain_cap,
+            prior_mode="null_space",
         )
         for chain_seed in seeds
     ]
@@ -757,8 +908,19 @@ def main() -> None:
     ]
     summaries = [
         _summarize(
-            "posterior_red_black",
-            red_black,
+            "rb_global_field",
+            red_black_global_field,
+            truth,
+            noise_floor,
+            args.coverage_level,
+            profile.trajectory_points,
+            profile.stabilization_window,
+            profile.stabilization_tolerance,
+            profile.misfit_trend_fraction,
+        ),
+        _summarize(
+            "rb_null_space",
+            red_black_null_space,
             truth,
             noise_floor,
             args.coverage_level,
@@ -797,6 +959,12 @@ def main() -> None:
         "rest of the field. Both compared schemes use matched unit-scale prior "
         "starts and the same synthetic truth."
     )
+    print(
+        "Prior note: rb_global_field uses delta_like + delta_global_field_prior "
+        "+ hard-null pCN q-ratio. rb_null_space uses the non-degenerate "
+        "reference-style delta_like - 0.5 * delta(||Z.T theta||^2); adding the "
+        "pCN q-ratio there would cancel the null-prior term into a no-op."
+    )
     print()
     print("RECOVERY AND COMPUTE-FAIR SUMMARY")
     _print_summary_table(summaries, noise_floor)
@@ -805,7 +973,7 @@ def main() -> None:
     _print_trajectories(summaries)
     print("Verdict:")
     print(
-        f"  {_verdict(summaries[0], summaries[1], noise_floor, recovery_gap_tolerance=profile.recovery_gap_tolerance)}"
+        f"  {_verdict(summaries[1], summaries[2], noise_floor, recovery_gap_tolerance=profile.recovery_gap_tolerance)}"
     )
 
 

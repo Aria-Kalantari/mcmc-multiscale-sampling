@@ -459,3 +459,59 @@
   global pCN, the conditioned formulation should be reconsidered. If either
   final window is still moving, the result remains unresolved and the report
   states which budgets to increase.
+
+## Null-Space Prior Diagnostic Variant
+
+- The resolving global-field run exposed a second red-black issue after the
+  initial improvement: posterior-mean relative-k reached about `0.46`, then
+  reversed to `0.8855` by `32000` local updates per chain while tail data
+  misfit continued falling. Global pCN flattened near `0.6050`. This is the
+  fit-the-data / move-away-from-truth symptom that motivates the local
+  null-coordinate diagnostic.
+- `Config.prior_mode` defaults to `"global_field"` so the M8 route-(a)
+  baseline remains unchanged. `prior_mode="null_space"` adds an explicit
+  reference-style diagnostic variant for hard conditioned updates only.
+- Let `eta = Z.T @ theta_local`. The null-space diagnostic accepts with
+  `log_alpha = delta_log_like - 0.5 * (||eta_candidate||^2 - ||eta_current||^2)`.
+  This is intentionally non-degenerate. Under the current hard-null pCN
+  proposal, adding M8's proposal-asymmetry term
+  `+0.5 * (||eta_candidate||^2 - ||eta_current||^2)` would cancel the local
+  null-prior ratio exactly and silently reduce the variant to likelihood-only
+  acceptance. The diagnostic therefore matches the reference-style
+  propose-project-then-penalize construction and omits that canceling term.
+- The null-space path is a targeted diagnostic/reference-style variant, not a
+  claim that the constraint-manifold MH derivation is complete. The existing
+  M8 `"global_field"` path and the v1 `"likelihood_only"` path are preserved.
+- Conditioned sampler states now record accepted and candidate
+  `||Z.T @ theta_local||` alongside `||theta_p||` and `||theta_local||`.
+  `exp08c_recovery_decision` reports those values at each trajectory
+  checkpoint so the reversal can be checked against local null-coordinate
+  growth directly.
+- The matched resolving command was:
+  `python -m experiments.exp08c_recovery_decision --resolve`. It ran `4`
+  chains with `2000` red-black sweeps (`32000` local updates per chain) for
+  each conditioned prior mode, `40000` global-pCN proposals per chain,
+  stride-`32` diagnostics, `12` checkpoints, and a `7200`-second per-scheme
+  cap. All requested budgets completed before their caps.
+- The M8 `global_field` row reproduced the reversal. Posterior-mean relative-k
+  improved to `0.4629` at `14187` local updates per chain, then climbed to
+  `0.8855`. Across that reversal, the checkpoint mean accepted local
+  null-coordinate norm increased from `10.085` to `14.813`, total accepted
+  local norm increased from `13.453` to `20.489`, and `theta_p` norm increased
+  from `10.256` to `13.511`. Tail misfit still fell to `73.411`, so the path
+  continued fitting pressure data while moving away from the truth.
+- The diagnostic `null_space` row changed acceptances and bounded the local
+  null coordinates: acceptance increased from `0.145` to `0.309`, final
+  checkpoint null norm was `4.792`, and the retained-sample maximum was
+  `6.16`. It nevertheless did not cure recovery. Relative-k reached about
+  `0.6351` and then reversed to `0.8176`; its final misfit checkpoint also
+  rose to `93.928`. The local null-space penalty alone is therefore
+  insufficient, consistent with the reference implementation also remaining
+  stuck.
+- Global pCN plateaued at relative-k `0.6050`, with tail misfit `41.545`.
+  The conditioned rows are not ready for M10/M11 optimization: the
+  global-field route drifts, and the reference-style local null penalty bounds
+  null coordinates without preventing the field-error reversal. The next
+  discussion should focus on the complete conditioned-prior /
+  constraint-manifold acceptance derivation rather than forcing a positive
+  recovery claim.

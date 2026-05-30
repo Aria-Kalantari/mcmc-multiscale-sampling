@@ -12,6 +12,7 @@ from mcmc_multiscale.observations import make_truth
 from mcmc_multiscale.sampler import (
     RedBlackSamplerState,
     _acceptance_log_ratio,
+    _null_space_log_prior_ratio,
     _null_pcn_proposal_correction,
     conditioned_sampler,
     red_black_conditioned_sampler,
@@ -86,6 +87,42 @@ def test_log_prior_field_round_trips_global_kle_coefficients() -> None:
 
 def test_config_defaults_to_posterior_acceptance() -> None:
     assert Config().acceptance == "posterior"
+    assert Config().prior_mode == "global_field"
+
+
+def test_null_space_log_prior_ratio_matches_known_case() -> None:
+    theta_current = np.asarray([1.0, 2.0, 3.0], dtype=np.float64)
+    theta_candidate = np.asarray([2.0, 0.5, 4.0], dtype=np.float64)
+    Z = np.asarray([[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]], dtype=np.float64)
+
+    assert _null_space_log_prior_ratio(
+        theta_current, theta_candidate, Z
+    ) == pytest.approx(-0.5 * ((2.0**2 + 0.5**2) - (1.0**2 + 2.0**2)))
+
+
+def test_null_space_prior_mode_is_non_degenerate_despite_pcn_q_ratio() -> None:
+    theta_current = np.asarray([0.5, -1.2], dtype=np.float64)
+    theta_candidate = np.asarray([1.1, 0.3], dtype=np.float64)
+    Z = np.eye(2, dtype=np.float64)
+    proposal_correction = _null_pcn_proposal_correction(
+        theta_current, theta_candidate, Z, proposal="pcn", conditioning_mode="hard"
+    )
+    likelihood_only = _acceptance_log_ratio(-1.5, -2.0, "likelihood_only")
+    null_space = _acceptance_log_ratio(
+        log_like_candidate=-1.5,
+        log_like_current=-2.0,
+        acceptance="posterior",
+        proposal_correction=proposal_correction,
+        prior_mode="null_space",
+        theta_current=theta_current,
+        theta_candidate=theta_candidate,
+        Z=Z,
+    )
+
+    assert null_space == pytest.approx(
+        likelihood_only + _null_space_log_prior_ratio(theta_current, theta_candidate, Z)
+    )
+    assert null_space != pytest.approx(likelihood_only)
 
 
 def test_hard_null_pcn_ratio_reduces_to_likelihood_only_for_fixed_constraints() -> None:
@@ -199,6 +236,83 @@ def test_posterior_red_black_sampler_is_deterministic_for_fixed_seed() -> None:
         )
 
 
+def test_global_field_prior_mode_is_the_posterior_default() -> None:
+    cfg = _small_cfg()
+    kwargs = dict(
+        cfg=cfg,
+        n_sweeps=2,
+        Mb=2,
+        theta_p_method="svd",
+        beta=cfg.beta,
+        acceptance="posterior",
+    )
+    implicit = list(
+        red_black_conditioned_sampler(rng=np.random.default_rng(cfg.seed), **kwargs)
+    )
+    explicit = list(
+        red_black_conditioned_sampler(
+            rng=np.random.default_rng(cfg.seed), prior_mode="global_field", **kwargs
+        )
+    )
+
+    for state_implicit, state_explicit in zip(implicit, explicit):
+        assert state_implicit.accepted == state_explicit.accepted
+        np.testing.assert_allclose(state_implicit.G_accepted, state_explicit.G_accepted)
+
+
+def test_null_space_prior_red_black_sampler_is_deterministic_for_fixed_seed() -> None:
+    cfg = _small_cfg()
+    kwargs = dict(
+        cfg=cfg,
+        n_sweeps=2,
+        Mb=2,
+        theta_p_method="svd",
+        beta=cfg.beta,
+        acceptance="posterior",
+        prior_mode="null_space",
+    )
+    states_a = list(
+        red_black_conditioned_sampler(rng=np.random.default_rng(cfg.seed), **kwargs)
+    )
+    states_b = list(
+        red_black_conditioned_sampler(rng=np.random.default_rng(cfg.seed), **kwargs)
+    )
+
+    for state_a, state_b in zip(states_a, states_b):
+        assert state_a.accepted == state_b.accepted
+        np.testing.assert_allclose(state_a.G_accepted, state_b.G_accepted)
+        assert state_a.null_space_norm_accepted == pytest.approx(
+            state_b.null_space_norm_accepted
+        )
+
+
+def test_null_space_prior_mode_changes_reduced_sampler_acceptances() -> None:
+    cfg = _small_cfg()
+    kwargs = dict(
+        cfg=cfg,
+        n_sweeps=30,
+        Mb=2,
+        theta_p_method="svd",
+        beta=cfg.beta,
+        acceptance="posterior",
+    )
+    global_field = list(
+        red_black_conditioned_sampler(
+            rng=np.random.default_rng(cfg.seed), prior_mode="global_field", **kwargs
+        )
+    )
+    null_space = list(
+        red_black_conditioned_sampler(
+            rng=np.random.default_rng(cfg.seed), prior_mode="null_space", **kwargs
+        )
+    )
+
+    assert any(
+        state_global.accepted != state_null.accepted
+        for state_global, state_null in zip(global_field, null_space)
+    )
+
+
 def test_reduced_posterior_recovery_is_bounded_and_improves_likelihood_only(
     recovery_runs: tuple[
         Config, list[RedBlackSamplerState], list[RedBlackSamplerState]
@@ -230,4 +344,19 @@ def test_invalid_acceptance_mode_raises() -> None:
         acceptance="bad",
     )
     with pytest.raises(ValueError, match="acceptance"):
+        list(states)
+
+
+def test_invalid_prior_mode_raises_for_posterior_acceptance() -> None:
+    cfg = _small_cfg()
+    states = red_black_conditioned_sampler(
+        cfg=cfg,
+        n_sweeps=1,
+        Mb=2,
+        theta_p_method="svd",
+        rng=np.random.default_rng(cfg.seed),
+        acceptance="posterior",
+        prior_mode="bad",
+    )
+    with pytest.raises(ValueError, match="prior_mode"):
         list(states)

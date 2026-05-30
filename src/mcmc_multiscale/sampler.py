@@ -70,6 +70,8 @@ class ConditionedSamplerState:
     theta_norm_candidate: float
     theta_p_norm: float
     theta_n_candidate_norm: float
+    null_space_norm_candidate: float
+    null_space_norm_accepted: float
     hidden_null_norm: float
     expected_norm: float
 
@@ -106,6 +108,9 @@ class RedBlackSamplerState:
     G_candidate: np.ndarray
     cond_A: float
     cond_B: float | None
+    theta_p_norm: float
+    null_space_norm_candidate: float
+    null_space_norm_accepted: float
     hidden_null_norm: float
 
 
@@ -168,6 +173,27 @@ def _validate_acceptance(acceptance: str) -> None:
         raise ValueError("acceptance must be 'posterior' or 'likelihood_only'.")
 
 
+def _validate_prior_mode(prior_mode: str, conditioning_mode: str) -> None:
+    if prior_mode not in {"global_field", "null_space"}:
+        raise ValueError("prior_mode must be 'global_field' or 'null_space'.")
+    if prior_mode == "null_space" and conditioning_mode != "hard":
+        raise ValueError("prior_mode='null_space' requires hard conditioning.")
+
+
+def _null_space_log_prior_ratio(
+    theta_current: np.ndarray,
+    theta_candidate: np.ndarray,
+    Z: np.ndarray,
+) -> float:
+    """Return the reference-style local null-coordinate log-prior ratio."""
+
+    eta_current = Z.T @ np.asarray(theta_current, dtype=np.float64)
+    eta_candidate = Z.T @ np.asarray(theta_candidate, dtype=np.float64)
+    return float(
+        -0.5 * (np.dot(eta_candidate, eta_candidate) - np.dot(eta_current, eta_current))
+    )
+
+
 def _acceptance_log_ratio(
     log_like_candidate: float,
     log_like_current: float,
@@ -176,6 +202,10 @@ def _acceptance_log_ratio(
     G_current_vec: np.ndarray | None = None,
     global_kle: GlobalKLE | None = None,
     proposal_correction: float = 0.0,
+    prior_mode: str = "global_field",
+    theta_current: np.ndarray | None = None,
+    theta_candidate: np.ndarray | None = None,
+    Z: np.ndarray | None = None,
 ) -> float:
     """Return the selected debug or posterior-correct acceptance log ratio."""
 
@@ -183,6 +213,19 @@ def _acceptance_log_ratio(
     log_alpha = float(log_like_candidate - log_like_current)
     if acceptance == "likelihood_only":
         return log_alpha
+    if prior_mode == "null_space":
+        if theta_current is None or theta_candidate is None or Z is None:
+            raise ValueError(
+                "null-space prior acceptance requires local coefficients and Z."
+            )
+        # The pCN q-ratio is deliberately omitted in this reference-style
+        # diagnostic variant. Adding it would cancel this null-prior ratio and
+        # silently reduce the update to likelihood-only acceptance.
+        return float(
+            log_alpha + _null_space_log_prior_ratio(theta_current, theta_candidate, Z)
+        )
+    if prior_mode != "global_field":
+        raise ValueError("prior_mode must be 'global_field' or 'null_space'.")
     if G_candidate_vec is None or G_current_vec is None or global_kle is None:
         raise ValueError("posterior acceptance requires fields and the global KLE.")
     return float(
@@ -348,6 +391,7 @@ def conditioned_sampler(
     conditioning_mode: str = "hard",
     rho: float | None = None,
     acceptance: str = "likelihood_only",
+    prior_mode: str | None = None,
 ) -> Iterator[ConditionedSamplerState]:
     """Run the M4 single-subdomain repeated-conditioning harness.
 
@@ -364,6 +408,9 @@ def conditioned_sampler(
         raise NotImplementedError("M4 implements only update_scheme='single'.")
     _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
     _validate_acceptance(acceptance)
+    prior_mode_value = cfg.prior_mode if prior_mode is None else prior_mode
+    if acceptance == "posterior":
+        _validate_prior_mode(prior_mode_value, conditioning_mode)
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
@@ -448,6 +495,10 @@ def conditioned_sampler(
             G_current_vec=accepted_vec,
             global_kle=global_kle,
             proposal_correction=proposal_correction,
+            prior_mode=prior_mode_value,
+            theta_current=theta_local_accepted,
+            theta_candidate=theta_local_candidate,
+            Z=Z,
         )
         accept_prob = _acceptance_probability(log_alpha)
         accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
@@ -484,6 +535,8 @@ def conditioned_sampler(
             theta_norm_candidate=theta_norm(theta_local_candidate),
             theta_p_norm=theta_norm(theta_p),
             theta_n_candidate_norm=theta_norm(theta_n_candidate),
+            null_space_norm_candidate=theta_norm(Z.T @ theta_local_candidate),
+            null_space_norm_accepted=theta_norm(Z.T @ theta_local_accepted),
             hidden_null_norm=hidden_null_norm,
             expected_norm=expected_norm,
             constraint_residual_candidate=constraint_residual(
@@ -513,6 +566,7 @@ def red_black_conditioned_sampler(
     conditioning_mode: str = "hard",
     rho: float | None = None,
     acceptance: str = "likelihood_only",
+    prior_mode: str | None = None,
 ) -> Iterator[RedBlackSamplerState]:
     """Run deterministic sequential red-black sweeps over all coarse subdomains.
 
@@ -526,6 +580,9 @@ def red_black_conditioned_sampler(
         raise ValueError("n_sweeps must be at least 1.")
     _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
     _validate_acceptance(acceptance)
+    prior_mode_value = cfg.prior_mode if prior_mode is None else prior_mode
+    if acceptance == "posterior":
+        _validate_prior_mode(prior_mode_value, conditioning_mode)
     beta_value = cfg.beta if beta is None else float(beta)
 
     truth = make_truth(cfg, rng)
@@ -621,6 +678,10 @@ def red_black_conditioned_sampler(
                     G_current_vec=accepted_vec,
                     global_kle=global_kle,
                     proposal_correction=proposal_correction,
+                    prior_mode=prior_mode_value,
+                    theta_current=theta_local_current,
+                    theta_candidate=theta_local_candidate,
+                    Z=Z,
                 )
                 accept_prob = _acceptance_probability(log_alpha)
                 accepted = bool(np.log(rng.uniform()) < min(0.0, log_alpha))
@@ -654,5 +715,8 @@ def red_black_conditioned_sampler(
                     G_candidate=G_candidate.copy(),
                     cond_A=float(cond_A),
                     cond_B=None if cond_B is None else float(cond_B),
+                    theta_p_norm=theta_norm(theta_p),
+                    null_space_norm_candidate=theta_norm(Z.T @ theta_local_candidate),
+                    null_space_norm_accepted=theta_norm(Z.T @ theta_local_accepted),
                     hidden_null_norm=hidden_null_norm,
                 )

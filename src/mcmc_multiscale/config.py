@@ -35,4 +35,5 @@ class Config:
     right_pressure: float = 0.0
     beta: float = 0.2
     acceptance: str = "posterior"
+    prior_mode: str = "global_field"
     n_chains: int = 4
