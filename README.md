@@ -39,6 +39,7 @@ python -m experiments.exp06_red_black_updates
 python -m experiments.exp07_posterior_recovery
 python -m experiments.exp08_convergence_diagnostics
 python -m experiments.exp08c_recovery_decision
+python -m experiments.exp09_acceleration
 ```
 
 ## Acceptance Modes
