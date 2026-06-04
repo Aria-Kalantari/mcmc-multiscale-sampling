@@ -756,14 +756,34 @@ def red_black_conditioned_sampler(
                 )
 
 
+def _block_scan_order(cfg: Config, scan_order: str) -> list[tuple[int, int]]:
+    """Return the coarse (row, col) visiting order for a block-Gibbs sweep.
+
+    ``"systematic"`` is lexicographic row-major order. ``"red_black"`` visits
+    all even-parity ``(row + col)`` cores, then all odd-parity cores, each block
+    still updated sequentially from its current full conditional. Under the dense
+    KLE+nugget precision ``Q`` same-color cores are NOT conditionally independent,
+    so this is an alternative sequential ordering, not a parallel/checkerboard
+    independence scheme. Invariance is order-independent either way.
+    """
+
+    if scan_order == "systematic":
+        return iter_coarse_subdomains(cfg)
+    if scan_order == "red_black":
+        colored = red_black_order(cfg)
+        return [*colored[0], *colored[1]]
+    raise ValueError("scan_order must be 'systematic' or 'red_black'.")
+
+
 def block_gibbs_sampler(
     cfg: Config,
     n_sweeps: int,
     rng: np.random.Generator,
     beta: float | None = None,
     block_nugget: float | None = None,
+    scan_order: str = "systematic",
 ) -> Iterator[BlockGibbsSamplerState]:
-    """Run systematic-scan precision block-Gibbs sweeps over the core blocks.
+    """Run precision block-Gibbs sweeps over the core blocks.
 
     This is the posterior-correct multiscale update derived in
     ``docs/conditioned_posterior_derivation.md``. Each core block (the core cells
@@ -773,6 +793,12 @@ def block_gibbs_sampler(
     conditional mean. Because that proposal is reversible w.r.t. the block's base
     Gaussian, the Metropolis acceptance is exactly likelihood-only, and a sweep
     over all cores targets ``pi(G | Y) ~ exp(-Phi_mis) N(0, C_tau)``.
+
+    ``scan_order`` selects the within-sweep visiting order of the cores,
+    ``"systematic"`` (default, lexicographic) or ``"red_black"`` (even then odd
+    ``(row + col)`` parity). Both are sequential systematic-scan Gibbs and target
+    the same posterior; red-black is only an ordering, not a parallel scheme
+    (same-color cores are coupled under the dense precision).
 
     This is additive: it does not modify ``conditioned_sampler`` /
     ``red_black_conditioned_sampler`` or their ``likelihood_only`` /
@@ -787,6 +813,7 @@ def block_gibbs_sampler(
     tau2 = cfg.block_nugget if block_nugget is None else float(block_nugget)
     if not np.isfinite(tau2) or tau2 <= 0.0:
         raise ValueError("block_nugget (tau^2) must be positive.")
+    coarse_order = _block_scan_order(cfg, scan_order)
 
     truth = make_truth(cfg, rng)
     _, _, _, _, global_pts = cell_centered_grid(cfg.nx, cfg.ny)
@@ -796,7 +823,7 @@ def block_gibbs_sampler(
 
     precision = build_precision(Phi_global, lambda_global, tau2)
     blocks: list[tuple[int, int, BlockConditioner]] = []
-    for row, col in iter_coarse_subdomains(cfg):
+    for row, col in coarse_order:
         sub = make_subdomain_at(cfg, row, col)
         conditioner = make_block_conditioner(precision, sub.core_global_idx)
         blocks.append((row, col, conditioner))

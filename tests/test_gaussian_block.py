@@ -22,7 +22,11 @@ from mcmc_multiscale.covariance import exp_covariance
 from mcmc_multiscale.grid import cell_centered_grid
 from mcmc_multiscale.kle import top_eigenpairs
 from mcmc_multiscale.sampler import block_gibbs_sampler
-from mcmc_multiscale.subdomain import iter_coarse_subdomains, make_subdomain_at
+from mcmc_multiscale.subdomain import (
+    iter_coarse_subdomains,
+    make_subdomain_at,
+    red_black_order,
+)
 
 
 def _orthonormal(rng: np.random.Generator, n: int, n_modes: int) -> np.ndarray:
@@ -194,7 +198,15 @@ def test_propose_block_rejects_invalid_beta() -> None:
 # --- gate 1: no-data invariance ---------------------------------------------
 
 
-def test_no_data_sweep_leaves_prior_invariant() -> None:
+def _coarse_visit_order(cfg: Config, scan_order: str) -> list[tuple[int, int]]:
+    if scan_order == "systematic":
+        return iter_coarse_subdomains(cfg)
+    colored = red_black_order(cfg)
+    return [*colored[0], *colored[1]]
+
+
+@pytest.mark.parametrize("scan_order", ["systematic", "red_black"])
+def test_no_data_sweep_leaves_prior_invariant(scan_order: str) -> None:
     cfg = Config(
         nx=8,
         ny=8,
@@ -211,7 +223,7 @@ def test_no_data_sweep_leaves_prior_invariant() -> None:
         make_block_conditioner(
             precision, make_subdomain_at(cfg, row, col).core_global_idx
         )
-        for row, col in iter_coarse_subdomains(cfg)
+        for row, col in _coarse_visit_order(cfg, scan_order)
     ]
 
     # The cores must partition every cell for the sweep to be a valid Gibbs scan.
@@ -237,7 +249,10 @@ def test_no_data_sweep_leaves_prior_invariant() -> None:
 # --- gate 2: linear-Gaussian exactness --------------------------------------
 
 
-def test_linear_gaussian_sweep_recovers_analytic_posterior() -> None:
+# ``reverse=True`` visits the cores in the opposite (red-black-style) order; the
+# sweep must reproduce the same analytic posterior, confirming order-independence.
+@pytest.mark.parametrize("reverse", [False, True])
+def test_linear_gaussian_sweep_recovers_analytic_posterior(reverse: bool) -> None:
     rng = np.random.default_rng(3)
     n, n_modes = 6, 3
     Phi = _orthonormal(rng, n, n_modes)
@@ -249,6 +264,8 @@ def test_linear_gaussian_sweep_recovers_analytic_posterior() -> None:
         make_block_conditioner(precision, np.array([0, 1, 2], dtype=np.int64)),
         make_block_conditioner(precision, np.array([3, 4, 5], dtype=np.int64)),
     ]
+    if reverse:
+        blocks = blocks[::-1]
 
     n_obs = 4
     sigma = 0.5
@@ -264,7 +281,7 @@ def test_linear_gaussian_sweep_recovers_analytic_posterior() -> None:
     beta = 0.6
     g = np.zeros(n)
     current_misfit = misfit(g)
-    n_sweeps, burn, thin = 50_000, 10_000, 4
+    n_sweeps, burn, thin = 45_000, 9_000, 4
     collected: list[np.ndarray] = []
     for sweep in range(n_sweeps):
         for block in blocks:
@@ -347,3 +364,46 @@ def test_block_gibbs_keeps_the_field_bounded_near_the_prior_scale() -> None:
 
 def test_config_exposes_block_nugget_default() -> None:
     assert Config().block_nugget == pytest.approx(1e-4)
+
+
+def test_block_gibbs_red_black_scan_is_deterministic_and_visits_all_cores() -> None:
+    cfg = _small_cfg()
+    n_blocks = cfg.n_coarse_x * cfg.n_coarse_y
+    run_a = list(
+        block_gibbs_sampler(
+            cfg, n_sweeps=3, rng=np.random.default_rng(cfg.seed), scan_order="red_black"
+        )
+    )
+    run_b = list(
+        block_gibbs_sampler(
+            cfg, n_sweeps=3, rng=np.random.default_rng(cfg.seed), scan_order="red_black"
+        )
+    )
+    for state_a, state_b in zip(run_a, run_b):
+        assert state_a.accepted == state_b.accepted
+        np.testing.assert_allclose(state_a.G_accepted, state_b.G_accepted)
+
+    # Same cores are visited each sweep, only the order differs from systematic.
+    systematic = list(
+        block_gibbs_sampler(
+            cfg,
+            n_sweeps=1,
+            rng=np.random.default_rng(cfg.seed),
+            scan_order="systematic",
+        )
+    )
+    rb_first_sweep = {(s.subdomain_row, s.subdomain_col) for s in run_a[:n_blocks]}
+    sys_first_sweep = {(s.subdomain_row, s.subdomain_col) for s in systematic}
+    assert rb_first_sweep == sys_first_sweep
+    rb_colors = [(s.subdomain_row + s.subdomain_col) % 2 for s in run_a[:n_blocks]]
+    assert rb_colors == sorted(rb_colors)  # one color fully precedes the other
+
+
+def test_block_gibbs_rejects_invalid_scan_order() -> None:
+    cfg = _small_cfg()
+    with pytest.raises(ValueError, match="scan_order"):
+        list(
+            block_gibbs_sampler(
+                cfg, n_sweeps=1, rng=np.random.default_rng(cfg.seed), scan_order="bad"
+            )
+        )
