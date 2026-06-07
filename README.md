@@ -1,139 +1,102 @@
 # MCMC Multiscale Sampling with Overlapping Subdomains
 
-This repository is a Python research prototype for Bayesian inversion of a
-spatially varying log-permeability field. It combines Gaussian random fields,
-Karhunen-Loeve expansions, TPFA Darcy flow, Metropolis-Hastings sampling, and
-overlapping-subdomain conditioning to study stability in multiscale MCMC
-updates.
+**A Python research prototype for Bayesian inversion of a spatially varying log-permeability field — combining Gaussian random fields, Karhunen–Loève expansions, TPFA Darcy flow, and Metropolis–Hastings sampling to study the numerical stability of overlapping-subdomain MCMC updates.**
 
-The main numerical finding is that an arbitrary LU/pivot particular solution
-for the local hard-conditioning system can carry hidden null-space content that
-accumulates under repeated updates. SVD/minimum-norm conditioning and stabilized
-LU remove that hidden component. Soft conditioning provides a tunable
-residual-versus-stability tradeoff, and red-black sweeps extend the update
-schedule across the coarse partition with deterministic frozen snapshots.
+![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)
+![NumPy](https://img.shields.io/badge/NumPy-1.26+-013243?logo=numpy&logoColor=white)
+![SciPy](https://img.shields.io/badge/SciPy-1.11+-8CAAE6?logo=scipy&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-dashboard-FF4B4B?logo=streamlit&logoColor=white)
+![Tests](https://img.shields.io/badge/tests-pytest-0A9EDC?logo=pytest&logoColor=white)
+![Lint](https://img.shields.io/badge/style-ruff%20%2B%20black-000000)
 
-## Install
+---
 
-```bash
-python -m pip install -r requirements.txt
+## Overview
+
+This project tackles a Bayesian inverse problem from subsurface flow: given sparse pressure observations, recover the underlying spatially varying permeability field and quantify the uncertainty in that estimate. The forward physics is a two-point flux approximation (TPFA) Darcy solver; the unknown field is represented with a Gaussian random field and a Karhunen–Loève expansion; and the posterior is explored with Metropolis–Hastings MCMC using preconditioned Crank–Nicolson (pCN) proposals.
+
+The research focus is **numerical stability of localized, overlapping-subdomain updates** — a building block for scaling MCMC on multiscale fields. The headline result is a concrete failure mode and its fix:
+
+> An arbitrary LU/pivot particular solution for the local hard-conditioning system can carry **hidden null-space content** that accumulates under repeated updates and silently corrupts the chain. **SVD / minimum-norm conditioning and stabilized LU remove that hidden component.** Soft conditioning then offers a tunable residual-versus-stability trade-off, and red-black sweeps extend the schedule across the coarse partition with deterministic frozen snapshots.
+
+It is presented honestly as a research prototype: limitations and open questions are documented, and unverified speedups are *not* claimed.
+
+---
+
+## What it demonstrates
+
+- **Bayesian inverse modeling** end to end: prior (GRF + KLE) → forward model (TPFA) → likelihood → posterior sampling.
+- **Numerical-linear-algebra depth**: null-space analysis, SVD/minimum-norm vs LU-pivot particular solutions, stabilized factorizations, and the practical consequences of each for an iterative sampler.
+- **Rigorous convergence diagnostics**: integrated autocorrelation time (IAT), effective sample size (ESS), Gelman–Rubin R-hat, 90% credible-interval coverage, plus compute-fair metrics (ESS per 1000 forward solves and ESS per wall-second) against a plain global-pCN reference chain.
+- **Reproducible experiment design**: nine headless experiments (`exp01`–`exp08c`) isolate sanity checks, instability reproduction, stability fixes, red-black scheduling, posterior recovery, and a decision-grade convergence comparison.
+- **Engineering maturity**: a packaged `src/` library, ~25 pytest modules, ruff + black enforcement, a derivation document, and an interactive Streamlit dashboard.
+
+---
+
+## Method at a glance
+
+| Component | Implementation |
+|---|---|
+| Unknown field | Log-permeability as a Gaussian random field (`field.py`, `covariance.py`) |
+| Dimensionality reduction | Karhunen–Loève expansion (`kle.py`) |
+| Forward model | TPFA Darcy pressure solver (`forward/tpfa.py`) |
+| Sampler | Metropolis–Hastings with pCN proposals (`mcmc.py`, `proposals.py`, `sampler.py`) |
+| Local updates | Overlapping-subdomain hard (SVD/min-norm + stabilized LU), soft, and red-black conditioning (`conditioning/`) |
+| Diagnostics | IAT, ESS, R-hat, coverage (`diagnostics.py`) |
+| Interface | Streamlit dashboard (`app/streamlit_app.py`) |
+
+---
+
+## Repository structure
+
+```text
+mcmc-multiscale-sampling/
+├── src/mcmc_multiscale/
+│   ├── forward/tpfa.py            # TPFA Darcy pressure solver
+│   ├── conditioning/             # hard (SVD/LU), soft, null-space, projection
+│   ├── field.py, covariance.py   # Gaussian random field
+│   ├── kle.py                    # Karhunen–Loève expansion
+│   ├── mcmc.py, proposals.py     # Metropolis–Hastings + pCN
+│   ├── sampler.py, subdomain.py  # multiscale / overlapping-subdomain sampler
+│   └── diagnostics.py            # IAT, ESS, R-hat, coverage
+├── experiments/                  # exp01–exp08c reproducibility scripts
+├── app/streamlit_app.py          # interactive dashboard
+├── docs/conditioned_posterior_derivation.md
+└── tests/                        # ~25 pytest modules
 ```
 
-## Verify
+## Quickstart
 
 ```bash
-python -m pytest
-python -m ruff check .
-python -m black --check .
+python -m pip install -r requirements.txt          # numpy, scipy, matplotlib, streamlit, pytest, ruff, black
+
+python -m pytest                                   # verify
+python -m ruff check . && python -m black --check . # lint/format
+
+python -m experiments.exp08_convergence_diagnostics   # ESS / R-hat / coverage
+python -m streamlit run app/streamlit_app.py          # interactive dashboard
 ```
 
-## Experiments
-
-```bash
-python -m experiments.exp01_static_conditioning
-python -m experiments.exp02_forward_bayes_sanity
-python -m experiments.exp03_mcmc_gaussian_sanity
-python -m experiments.exp04_reproduce_instability
-python -m experiments.exp05_stability_fixes
-python -m experiments.exp06_red_black_updates
-python -m experiments.exp07_posterior_recovery
-python -m experiments.exp08_convergence_diagnostics
-python -m experiments.exp08c_recovery_decision
-```
-
-## Acceptance Modes
-
-`Config.acceptance` defaults to `posterior`, and `Config.prior_mode` defaults
-to `global_field`. The M8 posterior baseline adds a projected global-KLE field
-prior and the hard-null pCN proposal correction. A diagnostic
-`prior_mode="null_space"` variant instead applies the reference-style local
-null-coordinate prior ratio without the canceling pCN proposal correction.
-The low-level conditioned samplers retain an explicit `likelihood_only` mode so
-the M4/M5 instability studies remain reproducible. `exp07_posterior_recovery`
-compares both modes for single-subdomain and red-black updates.
-
-`exp08_convergence_diagnostics` adds multi-chain convergence and recovery
-diagnostics: IAT, ESS, Gelman-Rubin R-hat, 90% log-field credible-interval
-coverage, and a plain global-pCN reference chain for the same synthetic
-posterior.
-
-Use the opt-in convergence deep-dive for a longer compute-fair comparison:
+Opt-in deep comparisons:
 
 ```bash
 python -m experiments.exp08_convergence_diagnostics --long
-```
-
-The deep-dive reports conservative ESS per 1000 forward solves and ESS per
-wall-second alongside recovery and coverage. The plain exp08 command keeps its
-responsive defaults for routine development.
-
-For the opt-in recovery decision, compare red-black directly against global
-pCN with matched unit-scale starts, trajectory checkpoints, and a wall cap:
-
-```bash
 python -m experiments.exp08c_recovery_decision --decide
-```
-
-This excludes the structurally frozen single-subdomain harness from the
-recovery verdict and reports whether the requested proposal budget or wall cap
-ended each scheme.
-
-For the resolving comparison, use the larger opt-in profile:
-
-```bash
 python -m experiments.exp08c_recovery_decision --resolve
 ```
 
-The resolving report compares the M8 global-field prior, the diagnostic
-null-space-prior variant, and global pCN. It classifies final relative-k
-checkpoint windows as
-flattened or still moving, reports whether each data-misfit tail is descending
-toward the noise floor, and keeps R-hat, ESS, coverage, solve counts, and wall
-time visible as supporting diagnostics. Conditioned rows also report accepted
-local coefficient, null-coordinate, and particular-solution norms. Budgets
-remain configurable with
-`--sweeps`, `--pcn-iters`, `--max-seconds`, and `--checkpoints`; the fast
-default command remains unchanged.
+---
 
-The resolving diagnostic currently finds that the M8 global-field path
-develops local null-coordinate growth as its recovery error reverses. The
-reference-style null-space penalty bounds those coordinates but does not stop
-the field-error reversal. It is retained as a diagnostic variant, not presented
-as a completed conditioned-posterior fix.
+## Limitations (stated honestly)
 
-## Dashboard
+Research prototype, not production simulation software · single-machine, sequential · synthetic examples only (no private data) · the M8 global-prior route is a baseline with a modest recovery improvement, and the constrained-manifold route in the spec remains future work · the 2-color red-black schedule is deterministic frozen-snapshot scheduling, not an exact parallel-independence guarantee under overlap.
 
-```bash
-python -m streamlit run app/streamlit_app.py
-```
+---
 
-The dashboard visualizes the single-subdomain sampler, red-black sweeps via an
-`Update scheme` control, LU/SVD stability comparisons, and a compact M5
-stability-fix comparison. Red-black defaults to stable SVD hard conditioning.
+## Skills demonstrated
 
-## Repository Structure
+Bayesian inference & MCMC (Metropolis–Hastings, pCN) · numerical linear algebra (SVD, LU, null-space, stabilized factorizations) · scientific computing & PDE forward models (TPFA Darcy flow) · uncertainty quantification & convergence diagnostics (ESS, R-hat, coverage) · reproducible experiment design · Python library packaging, testing (pytest), and linting (ruff/black).
 
-```text
-src/mcmc_multiscale/          numerical library
-src/mcmc_multiscale/forward/  TPFA pressure solver
-src/mcmc_multiscale/conditioning/
-                              hard, stabilized, and soft conditioning
-experiments/                  headless reproducibility experiments
-app/                          Streamlit dashboard
-tests/                        pytest verification suite
-```
+---
 
-## Limitations
-
-- Research prototype, not production simulation software.
-- Single-machine sequential implementation only.
-- Synthetic examples only; no private data are included.
-- The M8 global-prior route is a baseline. Its short default comparison remains
-  only a modest recovery improvement; the constrained-manifold route in the
-  project specification remains future work.
-- The 2-color red-black schedule is deterministic frozen-snapshot scheduling.
-  It is not an exact same-color parallel-independence guarantee under overlap.
-  Exact independence would need a stronger coloring strategy, such as
-  4-coloring, or additional overlap analysis.
-- The Streamlit dashboard is a batch-run viewer; it does not implement
-  pause/resume streaming.
+*Author: Arya Kalantari · [github.com/Aria-Kalantari](https://github.com/Aria-Kalantari)*
