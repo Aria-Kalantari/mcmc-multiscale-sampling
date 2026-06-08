@@ -87,7 +87,7 @@ python -m experiments.exp08c_recovery_decision --resolve
 
 ---
 
-## Limitations (stated honestly)
+## Limitations
 
 Research prototype, not production simulation software · single-machine, sequential · synthetic examples only (no private data) · the M8 global-prior route is a baseline with a modest recovery improvement, and the constrained-manifold route in the spec remains future work · the 2-color red-black schedule is deterministic frozen-snapshot scheduling, not an exact parallel-independence guarantee under overlap.
 
