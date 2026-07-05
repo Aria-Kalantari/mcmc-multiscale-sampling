@@ -587,3 +587,27 @@
   --block-gibbs --resolve`, which is wired but was not run to completion here.
   Closing the efficiency gap is an M11 (mixing/tuning) question, not an M8
   correctness one.
+
+## Block-Gibbs Scan Order (red-black)
+
+- `block_gibbs_sampler` takes `scan_order in {"systematic","red_black"}`
+  (default `"systematic"`, lexicographic). `"red_black"` visits all even-parity
+  `(row + col)` cores, then all odd-parity cores, each core still updated
+  sequentially from its current full conditional. `scan_order` is the only
+  addition; the kernel, acceptance, defaults, and existing modes are unchanged,
+  and `scan_order="systematic"` reproduces the previous output bit-for-bit.
+- Important caveat (do not claim parallelism): under the dense KLE+nugget
+  precision `Q = (1/tau2)[I - Phi diag(d) Phi.T]`, two cores `S1`, `S2` of the
+  same color are coupled whenever `Phi_{S1} diag(d) Phi_{S2}.T != 0`, which holds
+  for the global smooth modes. So same-color cores are NOT conditionally
+  independent, and red-black here is purely an alternative sequential ordering,
+  not a checkerboard parallel-update scheme. (The classic red-black parallel
+  guarantee needs a sparse/local precision with nearest-neighbour coupling, which
+  this dense KLE precision is not.) Invariance is order-independent, so both
+  orders target the same posterior; whether red-black mixes faster is an
+  empirical question (see `exp09_acceleration`), not a structural speedup.
+- Correctness under red-black is covered by the gate tests in
+  `tests/test_gaussian_block.py`: the no-data `N(0, C_tau)` invariance gate is
+  parametrised over `scan_order in {"systematic","red_black"}`, and the
+  linear-Gaussian exactness gate is parametrised over forward/reversed core
+  order; both pass, confirming order-independence.
