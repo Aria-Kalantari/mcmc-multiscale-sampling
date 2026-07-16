@@ -9,22 +9,21 @@ All of this is diagnostic-only (SPEC 12); no recovery is claimed.
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import numpy as np
 import pytest
 
 from mcmc_multiscale.config import Config
+from mcmc_multiscale.diagnostics import relative_error
 from mcmc_multiscale.forward import ForwardModel
 from mcmc_multiscale.observations import make_truth
 
 from experiments.exp12_conditioning_diagnostics import (
     _field_misfit,
     _global_kle,
+    _pooled_relk_trajectory,
     _reversal_onset,
     _standardize_log_field,
     _standardized_misfit,
-    _sweep_relk,
 )
 
 
@@ -157,20 +156,61 @@ def test_standardization_chain_mean_differs_from_analytic_posterior() -> None:
 
 
 def test_reversal_onset_detects_rise_after_minimum() -> None:
-    """Onset is the first sweep that rises past an interior running minimum."""
-    assert _reversal_onset(np.array([0.9, 0.6, 0.46, 0.5, 0.7, 0.88])) == 4
+    """Onset is the first sustained rise past the post-burn running minimum."""
+    # descend to an interior post-burn minimum, then a sustained (3-point) rise
+    relk = np.array([0.90, 0.85, 0.80, 0.70, 0.60, 0.50, 0.45, 0.60, 0.70, 0.80])
+    assert _reversal_onset(relk) == 8
     # monotone descending -> minimum at the end -> no reversal
-    assert _reversal_onset(np.array([0.9, 0.7, 0.5, 0.4, 0.3])) is None
-    # monotone rising -> minimum at the start -> no reversal
-    assert _reversal_onset(np.array([0.3, 0.5, 0.7])) is None
-    # too short
+    assert _reversal_onset(np.array([0.9, 0.8, 0.7, 0.6, 0.5, 0.4, 0.3])) is None
+    # too short after the burn cut
     assert _reversal_onset(np.array([0.5, 0.4])) is None
 
 
-def test_sweep_relk_extracts_one_value_per_sweep() -> None:
-    """_sweep_relk returns the last accepted rel-k of each sweep, in order."""
-    states = [
-        SimpleNamespace(sweep=s, relative_k_error_accepted=float(v))
-        for s, v in [(1, 0.9), (1, 0.8), (2, 0.7), (2, 0.6), (3, 0.55)]
-    ]
-    np.testing.assert_array_equal(_sweep_relk(states), np.array([0.8, 0.6, 0.55]))
+def test_reversal_onset_ignores_burn_in_dip_before_descent() -> None:
+    """A burn-in dip followed by a genuine descent is NOT a reversal.
+
+    The dip lives in the excluded burn region; the post-burn trajectory only
+    descends, so no upward reversal is reported. (This is the failure the old
+    detector had -- it fired on the start-up transient.)
+    """
+    relk = np.array([0.95, 0.62, 0.90, 0.85, 0.78, 0.70, 0.60, 0.52, 0.46, 0.40])
+    assert _reversal_onset(relk) is None
+
+
+def test_reversal_onset_ignores_single_noisy_uptick() -> None:
+    """A lone spike above an interior minimum is not a sustained reversal."""
+    # post-burn min 0.45 at index 5; index 6 spikes to 0.90 but 7,8 fall back,
+    # so no run of 3 consecutive points stays above the floor -> no reversal.
+    relk = np.array([0.9, 0.85, 0.8, 0.6, 0.5, 0.45, 0.90, 0.46, 0.47, 0.45])
+    assert _reversal_onset(relk) is None
+
+
+def test_reversal_onset_ignores_drift_without_descent() -> None:
+    """Drift-from-the-start (never recovering) is not a reversal.
+
+    This is the reduced-grid K=1 signature: the post-burn trajectory only rises,
+    so its minimum is not below the post-burn start and no genuine descent
+    occurred. A rise without a prior descent must NOT be called a reversal.
+    """
+    relk = np.array([0.90, 0.95, 1.00, 1.00, 1.02, 1.05, 1.03, 1.08, 1.10, 1.12])
+    assert _reversal_onset(relk) is None
+
+
+def test_pooled_relk_trajectory_averages_across_chains() -> None:
+    """The pooled trajectory scores rel-k of the mean over pooled post-burn fields.
+
+    Two constant chains at fields a and b pool to the constant field (a+b)/2 at
+    every checkpoint, so every rel-k equals relative_error(exp((a+b)/2), k_true).
+    """
+    ny, nx, n_sweeps = 3, 4, 12
+    field_a = np.full((n_sweeps, ny, nx), 0.4)
+    field_b = np.full((n_sweeps, ny, nx), 0.8)
+    truth_k = np.exp(np.full((ny, nx), 0.5))
+
+    sweeps, relk = _pooled_relk_trajectory(
+        [field_a, field_b], truth_k, burn_fraction=1.0 / 3.0, n_checkpoints=5
+    )
+    assert sweeps.shape == relk.shape
+    assert sweeps[0] > int(n_sweeps / 3) - 1  # checkpoints are post-burn
+    expected = relative_error(np.exp(np.full((ny, nx), 0.6)), truth_k)
+    np.testing.assert_allclose(relk, expected, rtol=0, atol=1e-12)

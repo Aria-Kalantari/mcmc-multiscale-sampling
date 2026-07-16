@@ -14,16 +14,23 @@ Two subcommands, one per probe:
 
   (b) refresh -- sweep cond_refresh_period K in {1,2,4,8,16} on
       red_black_conditioned_sampler in the global_field posterior regime that
-      exhibits the rel-k reversal, and plot the rel-k trajectory per K. A larger
-      K is expected to DELAY the reversal onset. Mitigation, not a cure.
+      exhibits the rel-k reversal, and plot the reversal trajectory per K. The
+      metric is the rel-k of the POOLED posterior-mean field across N independent
+      chains that share one truth: single chains only plateau (~0.75 on 48x48);
+      pooling across chains cancels per-chain drift and exposes the documented
+      descend-then-rise (0.4629 -> 0.8855). The reduced 16x16 grid does NOT host
+      the reversal (best pooled floor ~0.88); the study runs on the full 48x48
+      config by default. Hypothesis: a larger K DELAYS the reversal onset.
+      Mitigation, not a cure (SPEC 0 [V4] closure 1).
 
 Run (from the repository root):
 
   python -m experiments.exp12_conditioning_diagnostics standardize
+  # Full 48x48 pooled sweep (the real study; long -- hours, run overnight):
   python -m experiments.exp12_conditioning_diagnostics refresh
-  python -m experiments.exp12_conditioning_diagnostics refresh --ks 1,2,4,8,16 \
-      --n-sweeps 400
-  python -m experiments.exp12_conditioning_diagnostics refresh --full-grid
+  # Cheap smoke test on the reduced grid (does NOT host the reversal):
+  python -m experiments.exp12_conditioning_diagnostics refresh --reduced \
+      --n-sweeps 40 --n-chains 2 --ks 1,4
 """
 
 from __future__ import annotations
@@ -232,52 +239,136 @@ def _run_field_chain(
 # --------------------------------------------------------------------------- #
 # (b) refresh / reversal primitives
 # --------------------------------------------------------------------------- #
-def _sweep_relk(states: list) -> np.ndarray:
-    """Return one accepted rel-k per sweep (the last state of each sweep)."""
-    by_sweep: dict[int, float] = {}
-    for state in states:
-        by_sweep[state.sweep] = state.relative_k_error_accepted
-    return np.asarray([by_sweep[s] for s in sorted(by_sweep)], dtype=np.float64)
+def _pooled_relk_trajectory(
+    chain_fields: list[np.ndarray],
+    truth_k: np.ndarray,
+    burn_fraction: float = 1.0 / 3.0,
+    n_checkpoints: int = 24,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Running rel-k of the POOLED posterior-mean field, at growing checkpoints.
 
-
-def _reversal_onset(relk: np.ndarray, tol: float = 1e-3) -> int | None:
-    """Return the 1-based sweep at which rel-k first reverses upward, else None.
-
-    A reversal is a descend-then-rise: the running minimum occurs at an interior
-    sweep, and a later sweep exceeds that minimum by more than ``tol``. A
-    monotone or still-descending trajectory has no reversal (returns None).
+    ``chain_fields`` is one ``(n_sweeps, ny, nx)`` accepted-field array per chain
+    (all chains share one truth). Following the exp08c convention the first
+    ``burn_fraction`` of each chain is discarded, then at each checkpoint the
+    post-burn samples from every chain up to that prefix are pooled, averaged into
+    a single posterior-mean field, and scored by rel-k of ``exp(mean)``. Pooling
+    across independent chains is what cancels per-chain drift and exposes the
+    documented descend-then-rise -- a single chain only plateaus. Returns
+    ``(sweeps_axis, relk)`` where ``sweeps_axis`` is the 1-based sweep of each
+    checkpoint.
     """
-    series = np.asarray(relk, dtype=np.float64)
-    if series.size < 3:
-        return None
-    i_min = int(np.argmin(series))
-    if i_min == 0 or i_min == series.size - 1:
-        return None
-    floor = float(series[i_min])
-    for j in range(i_min + 1, series.size):
-        if series[j] > floor + tol:
-            return j + 1
-    return None
+    n_sweeps = chain_fields[0].shape[0]
+    burn = int(burn_fraction * n_sweeps)
+    if n_sweeps - burn < 2:
+        raise ValueError("burn-in leaves too few retained samples.")
+    retained = [fields[burn:] for fields in chain_fields]
+    n_ret = n_sweeps - burn
+    prefixes = sorted(
+        {
+            max(1, int(round(fr * n_ret)))
+            for fr in np.linspace(1.0 / n_checkpoints, 1.0, n_checkpoints)
+        }
+    )
+    sweeps_axis = np.asarray([burn + p for p in prefixes], dtype=np.int64)
+    relk = np.empty(len(prefixes), dtype=np.float64)
+    for i, p in enumerate(prefixes):
+        pooled = np.concatenate([r[:p] for r in retained], axis=0)
+        g_mean = pooled.mean(axis=0)
+        relk[i] = relative_error(permeability_from_log_field(g_mean), truth_k)
+    return sweeps_axis, relk
 
 
-def _run_refresh(
-    cfg: Config, Mb: int, K: int, n_sweeps: int, beta: float, seed: int
-) -> np.ndarray:
-    """Run the red-black global_field chain at cond_refresh_period=K; per-sweep rel-k."""
-    states = list(
-        red_black_conditioned_sampler(
+def _run_pooled_chains(
+    cfg: Config,
+    K: int,
+    n_chains: int,
+    n_sweeps: int,
+    Mb: int,
+    beta: float,
+    seed: int,
+    initial_scale: float,
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """Run ``n_chains`` independent chains sharing one truth, at refresh period K.
+
+    Uses the exp08 ``_TruthReplayGenerator`` so every chain targets the SAME
+    posterior (shared truth / observations) while starting from an independent
+    field -- the pooled posterior mean is only meaningful across chains that share
+    the truth. Returns ``(chain_fields, truth_k)``.
+    """
+    # Lazy import so exp12's module import stays light (tests import exp12).
+    from experiments.exp08_convergence_diagnostics import (
+        _TruthReplayGenerator,
+        _truth_replay_prefix,
+    )
+
+    n_sub = cfg.n_coarse_x * cfg.n_coarse_y
+    truth, truth_draw, noise_draw = _truth_replay_prefix(cfg)
+    chain_fields: list[np.ndarray] = []
+    for i in range(n_chains):
+        rng = _TruthReplayGenerator(
+            theta_true_draw=truth_draw,
+            noise_draw=noise_draw,
+            chain_seed=seed + 100 + i,
+            n_initial_draws=1 + n_sub,
+            initial_scale=initial_scale,
+        )
+        fields = np.empty((n_sweeps, cfg.ny, cfg.nx), dtype=np.float64)
+        for state in red_black_conditioned_sampler(
             cfg,
             n_sweeps=n_sweeps,
             Mb=Mb,
             theta_p_method=_REFRESH_THETA_P,
-            rng=np.random.default_rng(seed),
+            rng=rng,  # type: ignore[arg-type]
             beta=beta,
             acceptance=_REFRESH_ACCEPTANCE,
             prior_mode=_REFRESH_PRIOR_MODE,
             cond_refresh_period=K,
-        )
-    )
-    return _sweep_relk(states)
+        ):
+            fields[state.sweep - 1] = state.G_accepted
+        chain_fields.append(fields)
+        print(f"    chain {i + 1}/{n_chains} done", flush=True)
+    return chain_fields, truth.k_true
+
+
+def _reversal_onset(
+    relk: np.ndarray,
+    burn_fraction: float = 1.0 / 3.0,
+    tol: float = 1e-2,
+    rise_window: int = 3,
+    min_descent: float = 0.03,
+) -> int | None:
+    """Return the 1-based checkpoint of a genuine post-burn reversal, else None.
+
+    A reversal is a genuine descend-then-rise. Following the exp08c convention,
+    the first ``burn_fraction`` of the trajectory (the start-up transient) is
+    excluded so a burn-in dip cannot masquerade as the reversal minimum. Then
+    two conditions must both hold on the post-burn region:
+
+    1. A genuine descent: the post-burn minimum lies at least ``min_descent``
+       below the first post-burn value. Without this, a chain that merely drifts
+       upward (never recovering) is not a reversal -- it never descended.
+    2. A sustained rise: a run of ``rise_window`` consecutive later checkpoints
+       all exceed the minimum by more than ``tol`` (a lone noisy uptick does not
+       count).
+
+    A monotone, still-descending, or drift-from-the-start trajectory returns
+    None.
+    """
+    series = np.asarray(relk, dtype=np.float64)
+    n = series.size
+    start = int(burn_fraction * n)
+    if n - start < 3 or rise_window < 1:
+        return None
+    i_min = start + int(np.argmin(series[start:]))
+    if i_min > n - 1 - rise_window:
+        return None
+    floor = float(series[i_min])
+    if float(series[start]) - floor < min_descent:
+        return None
+    for j in range(i_min + 1, n - rise_window + 1):
+        if np.all(series[j : j + rise_window] > floor + tol):
+            return j + 1
+    return None
 
 
 # --------------------------------------------------------------------------- #
@@ -344,32 +435,35 @@ def _plot_standardize_fields(
 
 
 def _plot_refresh_relk(
-    ks: list[int], relks: list[np.ndarray], onsets: list[int | None], path: Path
+    ks: list[int],
+    axes_relks: list[tuple[np.ndarray, np.ndarray]],
+    onsets: list[int | None],
+    path: Path,
 ) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(6.4, 4.2))
-    for K, relk, onset in zip(ks, relks, onsets):
-        sweeps = np.arange(1, relk.size + 1)
-        line = ax.plot(sweeps, relk, lw=1.2, label=f"K={K}")[0]
+    fig, ax = plt.subplots(figsize=(6.8, 4.4))
+    for K, (sweeps, relk), onset in zip(ks, axes_relks, onsets):
+        line = ax.plot(sweeps, relk, lw=1.4, marker=".", ms=3, label=f"K={K}")[0]
         if onset is not None:
+            # onset is a 1-based checkpoint index into this K's trajectory
             ax.plot(
-                onset,
+                sweeps[onset - 1],
                 relk[onset - 1],
                 marker="v",
-                ms=6,
+                ms=8,
                 color=line.get_color(),
             )
-    ax.set_xlabel("sweep")
-    ax.set_ylabel("rel-k of accepted field")
+    ax.set_xlabel("sweep (checkpoint)")
+    ax.set_ylabel("pooled posterior-mean rel-k")
     ax.set_title(
-        "cond_refresh_period delays but does not cure the reversal\n"
-        "(mitigation only -- SPEC 0 [V4] closure 1)"
+        "cond_refresh_period vs the global_field reversal\n"
+        "(mitigation only -- SPEC 0 [V4] closure 1; markers = reversal onset)"
     )
-    ax.legend(fontsize=8, title="markers = reversal onset")
+    ax.legend(fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=120)
     plt.close(fig)
@@ -429,31 +523,36 @@ def _write_refresh_table(
     ks: list[int],
     n_sweeps: int,
     n_sub: int,
-    relks: list[np.ndarray],
+    n_chains: int,
+    grid: str,
+    axes_relks: list[tuple[np.ndarray, np.ndarray]],
     onsets: list[int | None],
 ) -> None:
     header = [
-        "# exp12 (b) cond_refresh_period reversal sweep",
+        "# exp12 (b) cond_refresh_period vs the global_field reversal",
         "",
-        "Regime: acceptance=posterior, prior_mode=global_field, theta_p=svd",
-        "(the rel-k reversal, NOT the likelihood-only runaway).",
+        f"Grid {grid}, regime acceptance=posterior / prior_mode=global_field /",
+        "theta_p=svd (the documented rel-k reversal, NOT the likelihood-only",
+        "runaway). Metric: rel-k of the POOLED posterior-mean field across",
+        f"{n_chains} independent chains sharing one truth (single chains only",
+        "plateau; pooling exposes the descend-then-rise).",
         "",
         "**Mitigation, NOT a cure** -- SPEC 0 [V4] closure 1 proves the",
-        "repeated-conditioning route cannot be repaired. A larger K only delays",
+        "repeated-conditioning route cannot be repaired. A larger K can only delay",
         "the reversal; it does not recover the field.",
         "",
-        f"budget per K = {n_sweeps} sweeps x {n_sub} subdomains ="
-        f" {n_sweeps * n_sub} local updates.",
+        f"budget per K = {n_chains} chains x {n_sweeps} sweeps x {n_sub}"
+        f" subdomains = {n_chains * n_sweeps * n_sub} local updates.",
         "",
-        "| K  | onset sweep | min rel-k | final rel-k |",
-        "|----|-------------|-----------|-------------|",
+        "| K  | onset sweep | min pooled rel-k | final pooled rel-k |",
+        "|----|-------------|------------------|--------------------|",
     ]
     rows = []
-    for K, relk, onset in zip(ks, relks, onsets):
-        onset_str = "none" if onset is None else str(onset)
+    for K, (sweeps, relk), onset in zip(ks, axes_relks, onsets):
+        onset_str = "none" if onset is None else str(int(sweeps[onset - 1]))
         rows.append(
-            f"| {K:>2} | {onset_str:>11} | {relk.min():.4f}    |"
-            f" {relk[-1]:.4f}      |"
+            f"| {K:>2} | {onset_str:>11} | {relk.min():>16.4f} |"
+            f" {relk[-1]:>18.4f} |"
         )
     lines = header + rows + [""]
     path.write_text("\n".join(lines), encoding="utf-8")
@@ -570,36 +669,61 @@ def run_standardize(args: argparse.Namespace) -> None:
 def run_refresh(args: argparse.Namespace) -> None:
     outdir = Path(args.outdir) if args.outdir else DEFAULT_OUT
     outdir.mkdir(parents=True, exist_ok=True)
-    cfg = _full_config(args.seed) if args.full_grid else _reduced_config(args.seed)
+    cfg = _reduced_config(args.seed) if args.reduced else _full_config(args.seed)
+    grid = f"{cfg.nx}x{cfg.ny}"
     ks = [int(k) for k in args.ks.split(",")]
     n_sub = cfg.n_coarse_x * cfg.n_coarse_y
+    total = args.n_chains * args.n_sweeps * n_sub
     print(
-        f"[refresh] grid {cfg.nx}x{cfg.ny}, {cfg.n_global_modes} modes, "
-        f"n_sweeps={args.n_sweeps}, Mb={args.Mb}, K={ks}, seed={args.seed}"
+        f"[refresh] grid {grid}, {cfg.n_global_modes} modes, n_chains="
+        f"{args.n_chains}, n_sweeps={args.n_sweeps}, Mb={args.Mb}, K={ks}, "
+        f"seed={args.seed}  ({total} updates/K)"
     )
 
-    relks: list[np.ndarray] = []
+    axes_relks: list[tuple[np.ndarray, np.ndarray]] = []
     onsets: list[int | None] = []
     for K in ks:
-        relk = _run_refresh(cfg, args.Mb, K, args.n_sweeps, cfg.beta, args.seed)
+        print(f"  K={K} ...", flush=True)
+        chain_fields, truth_k = _run_pooled_chains(
+            cfg,
+            K,
+            args.n_chains,
+            args.n_sweeps,
+            args.Mb,
+            cfg.beta,
+            args.seed,
+            args.initial_scale,
+        )
+        sweeps, relk = _pooled_relk_trajectory(chain_fields, truth_k)
         onset = _reversal_onset(relk)
-        relks.append(relk)
+        axes_relks.append((sweeps, relk))
         onsets.append(onset)
-        onset_str = "none" if onset is None else str(onset)
+        # Incremental save so a crash mid-run keeps completed K's.
+        np.savez(
+            outdir / f"exp12_refresh_K{K}.npz",
+            sweeps=sweeps,
+            relk=relk,
+            onset=-1 if onset is None else onset,
+        )
+        onset_str = "none" if onset is None else str(int(sweeps[onset - 1]))
         print(
-            f"  K={K:>2}: min rel-k={relk.min():.4f}, "
-            f"final={relk[-1]:.4f}, onset sweep={onset_str}"
+            f"  K={K:>2}: min pooled rel-k={relk.min():.4f}, "
+            f"final={relk[-1]:.4f}, onset sweep={onset_str}",
+            flush=True,
         )
 
-    _plot_refresh_relk(ks, relks, onsets, outdir / "exp12_refresh_relk.png")
+    _plot_refresh_relk(ks, axes_relks, onsets, outdir / "exp12_refresh_relk.png")
     _write_refresh_table(
         outdir / "exp12_refresh_table.md",
         ks,
         args.n_sweeps,
         n_sub,
-        relks,
+        args.n_chains,
+        grid,
+        axes_relks,
         onsets,
     )
+    print("DONE")
 
 
 def main() -> None:
@@ -617,9 +741,15 @@ def main() -> None:
     b = sub.add_parser("refresh", help="M14(b) cond_refresh_period sweep")
     b.add_argument("--seed", type=int, default=7)
     b.add_argument("--ks", type=str, default=",".join(str(k) for k in _DEFAULT_KS))
-    b.add_argument("--n-sweeps", type=int, default=200)
+    b.add_argument("--n-sweeps", type=int, default=2000)
+    b.add_argument("--n-chains", type=int, default=4)
     b.add_argument("--Mb", type=int, default=8)
-    b.add_argument("--full-grid", action="store_true")
+    b.add_argument("--initial-scale", type=float, default=1.0)
+    b.add_argument(
+        "--reduced",
+        action="store_true",
+        help="use the cheap 16x16 grid (does NOT host the reversal; for testing)",
+    )
     b.add_argument("--outdir", type=str, default=None)
     b.set_defaults(func=run_refresh)
 

@@ -648,13 +648,29 @@
   `test_cond_refresh_period_default_reproduces_golden_fixture`.
 - The reversal it probes is the **`global_field` phenomenon**
   (acceptance=posterior, prior_mode=global_field, theta_p=svd; the
-  likelihood-only path is the separate runaway, not this reversal). `exp12
-  refresh` on the reduced 16x16 grid (200 sweeps x 16 subdomains = 3200 local
-  updates per K, seed 7) gives reversal onset / min rel-k:
-  `K=1: 3 / 0.836`, `K=2: 17 / 0.728`, `K=4: 68 / 0.652`, `K=8: 11 / 0.802`,
-  `K=16: 17 / 0.770`. For `K <= 4` a larger `K` clearly **delays** the onset and
-  reaches a **deeper** minimum -- the hypothesised mitigation. `K=8, 16` break the
-  trend: very stale conditioning makes `c` inconsistent with the evolving field
-  and introduces its own inconsistency-driven drift, so there is a sweet spot
-  around `K=4`. **Every `K` eventually reverses (final rel-k > min): a mitigation,
-  never a cure**, consistent with closure 1.
+  likelihood-only path is the separate runaway, not this reversal).
+- **Measurement pitfalls found and fixed (important).** The documented reversal
+  (`0.4629 -> 0.8855`, NOTES M9) is the rel-k of the **pooled posterior-mean
+  field across independent chains**, at post-burn checkpoints -- NOT the
+  instantaneous accepted-field rel-k, and NOT a single chain. Two wrong choices
+  were corrected: (i) an early version detected "onset" on the noisy
+  instantaneous per-sweep rel-k, which fired on the start-up transient;
+  `_reversal_onset` now excludes a `1/3` burn, requires a genuine descent below
+  the post-burn start, and requires a sustained (3-checkpoint) rise. (ii) The
+  reduced 16x16 grid was tried for budget but does **not host the reversal**:
+  single chains drift from sweep 1 (pm rel-k `0.90 -> 1.3`), and even pooled 4
+  chains bottom at only `~0.88`, far above the recoverable floor (global-pCN
+  reaches `0.31` there, so the posterior is recoverable -- the red-black
+  global_field sampler is what drifts). A single 48x48 chain also only plateaus
+  (pm rel-k `~0.75`, no reversal). The descent to `0.46` therefore **requires
+  pooling across chains on the full 48x48 config** (averaging cancels per-chain
+  drift). This is resolution-dependent: on 48x48 the informative likelihood lets
+  the chains descend first, then the conditioning-drift takes over; on the coarse
+  reduced grid the drift dominates immediately.
+- `exp12 refresh` (rebuilt) therefore runs the **full 48x48 config, pooled
+  `N`-chain (default 4) posterior-mean rel-k trajectory** (shared truth via the
+  exp08 `_TruthReplayGenerator`), sweeping `K in {1,2,4,8,16}`. It is a long
+  (multi-hour) run. **[RESULTS PENDING the 5-way pooled run.]** The hypothesis
+  remains: larger `K` delays the reversal onset (mitigation, not a cure -- every
+  `K` still reverses, per closure 1). The reduced grid stays available behind
+  `--reduced` for cheap code testing only.
