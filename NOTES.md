@@ -611,3 +611,50 @@
   parametrised over `scan_order in {"systematic","red_black"}`, and the
   linear-Gaussian exactness gate is parametrised over forward/reversed core
   order; both pass, confirming order-independence.
+
+## M14 Conditioning Diagnostics (experiment-only, NOT recovery claims)
+
+- Both probes are **mechanism evidence for the analysis paper**, never recovery.
+  SPEC 0 [V4] closure 1 is settled: the repeated-conditioning route cannot be
+  repaired (incompatible local-KLE conditionals), so nothing here can rescue it.
+  All new code is additive; the three samplers' semantics are unchanged.
+  `experiments/exp12_conditioning_diagnostics.py` (subcommands `standardize`,
+  `refresh`), tests in `tests/test_conditioning_diagnostics.py` and
+  `tests/test_cond_refresh_period.py`.
+- **(a) Standardization probe.** Replacing the log-perm field `G` by
+  `(G - mean(G)) / std(G)` before the forward solve does **not** fix the drift --
+  it makes the drift **invisible to the likelihood**. Because
+  `standardize(a*G) = standardize(G)` for `a > 0` and `G = Phi sqrt(lam) theta`,
+  the standardized misfit is exactly invariant under `theta -> a*theta`: the data
+  is blind to the KLE amplitude `||theta||`, which is precisely the scale the
+  drift lives in. So the standardized posterior reverts to the prior in the
+  amplitude direction and does **not** target `pi(G|Y)`. This is proved exactly
+  (no Monte Carlo) by
+  `test_standardization_makes_likelihood_scale_invariant_diagnostic_only`. In
+  `exp12 standardize` (reduced 16x16), over an amplitude sweep `a in [0.3, 3.0]`
+  the true-target misfit sweeps `1415 -> 13963` while the standardized misfit is
+  flat to `5e-14` relative. The standardized chain lands at rel-k `1.14` vs the
+  true target's `0.34`, but rel-k across the two is **not comparable** -- they are
+  different posteriors (pitfall 14); a lower standardized rel-k would be
+  meaningless. It changes the target, full stop.
+- **(b) `cond_refresh_period` (K).** New integer parameter on
+  `red_black_conditioned_sampler` that rebuilds the conditioning RHS `c` and
+  particular solution `theta_p` only every `K` sweeps (reusing a per-subdomain
+  cache in between). The cached block consumes no RNG, so the `rng` stream is
+  identical for every `K`; **default `K=1` reproduces the pre-change sampler
+  bit-for-bit**, pinned by the golden fixture
+  `tests/data/m14_red_black_golden.npz` (captured from the pristine sampler
+  before the change) in
+  `test_cond_refresh_period_default_reproduces_golden_fixture`.
+- The reversal it probes is the **`global_field` phenomenon**
+  (acceptance=posterior, prior_mode=global_field, theta_p=svd; the
+  likelihood-only path is the separate runaway, not this reversal). `exp12
+  refresh` on the reduced 16x16 grid (200 sweeps x 16 subdomains = 3200 local
+  updates per K, seed 7) gives reversal onset / min rel-k:
+  `K=1: 3 / 0.836`, `K=2: 17 / 0.728`, `K=4: 68 / 0.652`, `K=8: 11 / 0.802`,
+  `K=16: 17 / 0.770`. For `K <= 4` a larger `K` clearly **delays** the onset and
+  reaches a **deeper** minimum -- the hypothesised mitigation. `K=8, 16` break the
+  trend: very stale conditioning makes `c` inconsistent with the evolving field
+  and introduces its own inconsistency-driven drift, so there is a sweet spot
+  around `K=4`. **Every `K` eventually reverses (final rel-k > min): a mitigation,
+  never a cure**, consistent with closure 1.
