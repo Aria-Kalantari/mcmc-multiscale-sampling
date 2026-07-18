@@ -679,3 +679,85 @@
   **[RESULTS PENDING the corrected 5-way run.]** Hypothesis unchanged: larger `K`
   delays the reversal onset -- mitigation, not a cure (every `K` still reverses,
   per closure 1). The reduced grid stays behind `--reduced` for cheap code tests.
+
+## M15 Posterior-Informed Basis (exp13, SPEC 3.12)
+
+**Question.** Aidan gets a large MCMC speedup by building a preconditioning basis
+from a converged pilot (64 chains x 100k, MPSRF ~40k) then sampling preconditioned
+in ~3-3.5k. The pilot costs ~2.6M solves -- roughly the un-preconditioned run
+itself. Does a basis from the adjoint Gauss-Newton **Laplace Hessian at the MAP**
+(a few hundred solves, no pilot) buy the same informed directions? Aidan's config:
+20x20, squared-exponential kernel, `l=0.16`, 24 KLE modes.
+
+**Library additions (each gated).** `covariance.sqexp_covariance` (SE kernel
+`sigma^2 exp(-||x-x'||^2 / (2 l^2))`; symmetry / unit-diagonal / PSD / hand-checked
+2-point tests). `diagnostics.mpsrf` -- multivariate PSRF (Brooks-Gelman 1998),
+`sqrt(lambda_max(W^{-1} V_hat))`, `V_hat = ((n-1)/n) W + B/n`; it **reduces exactly
+to the repo's `gelman_rubin`** for `n_params==1` (same `(m+1)/m`-free convention;
+verified to 0.0) -- tests: reduction, ->1 well-mixed, >1 offset, invariance under a
+common invertible linear map, and a `n_samples>n_params` guard (generalized `eigh`
+returns garbage on a singular `W` rather than raising).
+
+**Method (reuse only; no new sampler).** `exp13` mirrors `exp10` and drives the
+already-gated `lis.py`: `gauss_newton_map` + `build_informed_subspace_adjoint`
+(cheap basis), `informed_subspace_from_samples` (pilot basis), `make_lis_proposal`
+(exact posterior-targeting via the Laplace reference `q*`), `principal_angles`.
+SE truth is built **inline** (the shared `make_truth` hard-codes the exponential
+kernel). Cheap basis = **528 solves** (MAP 463 + one adjoint Jacobian 65).
+`make_lis_proposal` is a Laplace-*reference* sampler (sticks from prior-scale
+dispersed starts), so all methods start over-dispersed relative to the Laplace
+posterior (`beta_informed=0.6`, not the independence sampler); a `global_pcn_prior`
+control uses prior-scale starts. Principal angles are compared on the **top-r**
+columns (full-rank-vs-full-rank angles are trivially 0); cheap orders by descending
+GN eigenvalue, pilot by ascending sample variance -- the same physical directions.
+
+**`sigma_obs` regime (provisional -- CONFIRM with Aidan).** Aidan did not state
+`sigma_obs` or sensor count. At the originally-suggested `sigma_obs=1e-3` the
+posterior spans a ~200x range of per-mode scales, so **no single-beta pCN baseline
+can converge** (zero/near-zero acceptance) -- not the regime where Aidan measured a
+converging ~40k baseline. `sigma_obs=0.02` (sensors 8x8) compresses the range to
+~33x with a genuine 17-mode informed subspace; both are CLI flags, printed
+provisional.
+
+**Main result (`sigma_obs=0.02`, 8 chains, baseline beta swept for fairness).**
+The baseline beta-grid `{0.03: acc 0.52, 0.05: acc 0.31}` **both fail to reach
+MPSRF<=1.2 within 40k**; the best (beta=0.03) descends then **plateaus at
+MPSRF ~1.7** (30k->1.70, 40k->1.75), and the prior-scale control behaves
+identically -- so this is **intrinsic mixing on an anisotropic posterior, not a
+start-transient**. pCN is geometrically ergodic (it would converge eventually);
+this is *practical* non-convergence within budget. Preconditioning with the
+528-solve cheap basis converges in ~10k (`posterior_informed`; pilot basis ~6.4k),
+so speedup is `>4x` (lower bound at the 40k cap). Principal angles (cheap vs pilot):
+**top-5 `[1.3, 2.0, 3.6, 6.6, 9.2]` deg; 14/17 informed dirs <10 deg, 12 <5 deg** --
+the cheap basis buys the same informed directions as the pilot's 160k-solve basis
+(same subspace, ~303x cheaper). The convergence is the proof the basis is good; the
+angles corroborate it. Outputs: `outputs/exp13/exp13_table.md`, `exp13_mpsrf.png`.
+
+**We do NOT claim reproduction of Aidan's 10x.** This is a *harder* regime than his
+(his baseline converged at ~40k; ours plateaus, so `sigma=0.02` is more
+anisotropic). The honest framing: at `sigma=0.02` preconditioning is **necessary,
+not merely faster**; the exact regime is a to-confirm item with Aidan.
+
+**Regime map (`--sigma-sweep`, 6 chains, `outputs/exp13/exp13_sigma_sweep.*`).**
+Baseline beta tuned per sigma (fewest iters, else closest-to-converging). As
+`sigma_obs` shrinks the posterior grows more anisotropic and single-beta pCN
+crosses from converging to plateauing, while the cheap basis matches the pilot in
+every regime:
+
+| sigma | informed rank | baseline (final MPSRF) | cheap conv | pilot conv | top-5 angles (deg) |
+|---|---|---|---|---|---|
+| 0.10 | 8  | **converges 5969** | 859  | 859  | 1.4, 2.7, 5.1, 6.3, 20.3 |
+| 0.05 | 12 | plateau (1.24, at edge) | 1677 | 2621 | 2.2, 2.9, 3.8, 5.5, 20.6 |
+| 0.02 | 17 | plateau (2.88) | ~10k* | 8000 | 2.3, 2.9, 3.7, 6.2, 7.9 |
+
+At `sigma=0.1` (looser, converging baseline) the cheap basis gives a clean **~7x**
+(5969/859) against a fairly-tuned baseline -- a converged-baseline speedup in the
+same ballpark as Aidan's, at a different regime. Top-4 principal angles stay <7 deg
+in all three regimes, so the basis result is **not** an artifact of the `sigma`
+choice. (*`sigma=0.02` cheap shows n/a in the coarse 6-chain sweep -- 10k was just
+short with 6 chains; the 8-chain main run converges at 10k.)
+
+**Gates.** No new sampler correctness gates -- `make_lis_proposal` is already gated
+(no-data invariance, linear-Gaussian exactness, rank-0 = global pCN) and
+config-independent; the frozen-basis property is structural (`InformedSubspace` is
+a frozen dataclass). Only the two new library functions are gated (above).

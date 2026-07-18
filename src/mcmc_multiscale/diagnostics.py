@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+from scipy.linalg import eigh
 from scipy.special import gammaln
 
 from mcmc_multiscale.subdomain import Subdomain, interface_jump_rms
@@ -151,6 +152,45 @@ def gelman_rubin(chains: np.ndarray) -> float:
         return 1.0 if between <= 0.0 else np.inf
     variance_hat = ((n_samples - 1.0) / n_samples) * within + between / n_samples
     return float(np.sqrt(max(0.0, variance_hat / within)))
+
+
+def mpsrf(chains: np.ndarray) -> float:
+    """Return the multivariate potential scale reduction factor (Brooks-Gelman 1998).
+
+    Input has shape `(n_chains, n_samples, n_params)`. With within-chain
+    covariance `W` (mean of per-chain sample covariances), between-chain
+    covariance `B / n` (covariance of the chain means), and
+    `V_hat = ((n - 1) / n) * W + B / n`, the estimator returns
+    `sqrt(lambda_max(W^{-1} V_hat))`. It is invariant to any common invertible
+    linear reparameterization of the coordinates -- the property that makes it
+    the right multivariate convergence diagnostic when per-mode posterior scales
+    differ by orders of magnitude. It reduces exactly to `gelman_rubin` when
+    `n_params == 1` (same `(m+1)/m`-free convention).
+    """
+
+    ch = np.asarray(chains, dtype=np.float64)
+    if ch.ndim != 3:
+        raise ValueError("chains must have shape (n_chains, n_samples, n_params).")
+    n_chains, n_samples, n_params = ch.shape
+    if n_chains < 2:
+        raise ValueError("mpsrf requires at least two chains.")
+    if n_samples < 2:
+        raise ValueError("mpsrf requires at least two samples per chain.")
+    if n_samples <= n_params:
+        raise ValueError("mpsrf requires n_samples > n_params (W would be singular).")
+    if not np.all(np.isfinite(ch)):
+        raise ValueError("chains must contain only finite values.")
+
+    means = ch.mean(axis=1)  # (n_chains, n_params)
+    within = np.atleast_2d(
+        np.mean([np.cov(ch[j], rowvar=False, ddof=1) for j in range(n_chains)], axis=0)
+    )
+    between_over_n = np.atleast_2d(np.cov(means, rowvar=False, ddof=1))
+    within = 0.5 * (within + within.T)
+    between_over_n = 0.5 * (between_over_n + between_over_n.T)
+    variance_hat = ((n_samples - 1.0) / n_samples) * within + between_over_n
+    eigenvalues = eigh(variance_hat, within, eigvals_only=True)
+    return float(np.sqrt(max(0.0, float(eigenvalues[-1]))))
 
 
 def posterior_summary(field_samples: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
