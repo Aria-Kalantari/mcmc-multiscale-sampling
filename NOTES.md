@@ -652,25 +652,30 @@
 - **Measurement pitfalls found and fixed (important).** The documented reversal
   (`0.4629 -> 0.8855`, NOTES M9) is the rel-k of the **pooled posterior-mean
   field across independent chains**, at post-burn checkpoints -- NOT the
-  instantaneous accepted-field rel-k, and NOT a single chain. Two wrong choices
-  were corrected: (i) an early version detected "onset" on the noisy
-  instantaneous per-sweep rel-k, which fired on the start-up transient;
-  `_reversal_onset` now excludes a `1/3` burn, requires a genuine descent below
-  the post-burn start, and requires a sustained (3-checkpoint) rise. (ii) The
-  reduced 16x16 grid was tried for budget but does **not host the reversal**:
-  single chains drift from sweep 1 (pm rel-k `0.90 -> 1.3`), and even pooled 4
-  chains bottom at only `~0.88`, far above the recoverable floor (global-pCN
-  reaches `0.31` there, so the posterior is recoverable -- the red-black
-  global_field sampler is what drifts). A single 48x48 chain also only plateaus
-  (pm rel-k `~0.75`, no reversal). The descent to `0.46` therefore **requires
-  pooling across chains on the full 48x48 config** (averaging cancels per-chain
-  drift). This is resolution-dependent: on 48x48 the informative likelihood lets
-  the chains descend first, then the conditioning-drift takes over; on the coarse
-  reduced grid the drift dominates immediately.
-- `exp12 refresh` (rebuilt) therefore runs the **full 48x48 config, pooled
-  `N`-chain (default 4) posterior-mean rel-k trajectory** (shared truth via the
-  exp08 `_TruthReplayGenerator`), sweeping `K in {1,2,4,8,16}`. It is a long
-  (multi-hour) run. **[RESULTS PENDING the 5-way pooled run.]** The hypothesis
-  remains: larger `K` delays the reversal onset (mitigation, not a cure -- every
-  `K` still reverses, per closure 1). The reduced grid stays available behind
-  `--reduced` for cheap code testing only.
+  instantaneous accepted-field rel-k, and NOT a single chain. Three findings, in
+  order:
+  1. `_reversal_onset` originally detected "onset" on the noisy instantaneous
+     per-sweep rel-k and fired on the start-up transient. It now excludes a `1/3`
+     burn, requires a genuine descent below the post-burn start, and requires a
+     sustained (3-checkpoint) rise.
+  2. A first rebuild pooled per-**sweep** end-of-sweep fields across chains, on
+     the reduced 16x16 grid and then the full 48x48 grid. Neither reproduced the
+     reference: reduced single chains drift (`0.90 -> 1.3`), reduced pooled bottom
+     at `~0.88`, and full-48x48 K=1 floored at `0.81` (Mb=8) / `0.94` (Mb=16). So
+     `Mb` was NOT the cause, and per-sweep pooling with an off-by-900 chain-seed
+     offset did not match exp08c.
+  3. Running exp08c's OWN pipeline unchanged (`_red_black_chain` per-state stride
+     collection, chain seeds `seed + 1000 + i`, `Mb=16`, `_trajectory`)
+     **reproduces the reference**: pooled posterior-mean rel-k descends
+     `0.556 -> 0.470` by 900 sweeps (K=1), matching the documented `0.4629`. The
+     divergence was the collection convention + seed offset, not the grid or `Mb`.
+- **Fix:** `exp12 refresh` now **reuses exp08c's validated pipeline verbatim**
+  (`_red_black_chain` + `_trajectory`), threading only `cond_refresh_period=K`
+  into the sampler. `_red_black_chain` gained an additive `cond_refresh_period=1`
+  argument (default = unchanged; exp08c's own calls are byte-identical). Because
+  `K=1` is bit-for-bit the default sampler, the K=1 row is **guaranteed** to equal
+  exp08c's reference (confirmed: 0.4704 at 900 sweeps), so K>1 is directly
+  comparable. Defaults: full 48x48, `Mb=16`, 4 chains, 2000 sweeps (~5 h).
+  **[RESULTS PENDING the corrected 5-way run.]** Hypothesis unchanged: larger `K`
+  delays the reversal onset -- mitigation, not a cure (every `K` still reverses,
+  per closure 1). The reduced grid stays behind `--reduced` for cheap code tests.

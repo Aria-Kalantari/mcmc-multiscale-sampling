@@ -13,14 +13,12 @@ import numpy as np
 import pytest
 
 from mcmc_multiscale.config import Config
-from mcmc_multiscale.diagnostics import relative_error
 from mcmc_multiscale.forward import ForwardModel
 from mcmc_multiscale.observations import make_truth
 
 from experiments.exp12_conditioning_diagnostics import (
     _field_misfit,
     _global_kle,
-    _pooled_relk_trajectory,
     _reversal_onset,
     _standardize_log_field,
     _standardized_misfit,
@@ -196,21 +194,15 @@ def test_reversal_onset_ignores_drift_without_descent() -> None:
     assert _reversal_onset(relk) is None
 
 
-def test_pooled_relk_trajectory_averages_across_chains() -> None:
-    """The pooled trajectory scores rel-k of the mean over pooled post-burn fields.
+def test_reversal_onset_detects_cumulative_mean_reversal() -> None:
+    """The refresh trajectory is a post-burn cumulative mean; detect its reversal.
 
-    Two constant chains at fields a and b pool to the constant field (a+b)/2 at
-    every checkpoint, so every rel-k equals relative_error(exp((a+b)/2), k_true).
+    ``refresh`` feeds ``_reversal_onset`` the exp08c cumulative-posterior-mean
+    checkpoints with ``burn_fraction=0`` (already post-burn). A descend-to-0.46
+    then rise-to-0.88 (the documented shape) must register an onset.
     """
-    ny, nx, n_sweeps = 3, 4, 12
-    field_a = np.full((n_sweeps, ny, nx), 0.4)
-    field_b = np.full((n_sweeps, ny, nx), 0.8)
-    truth_k = np.exp(np.full((ny, nx), 0.5))
-
-    sweeps, relk = _pooled_relk_trajectory(
-        [field_a, field_b], truth_k, burn_fraction=1.0 / 3.0, n_checkpoints=5
-    )
-    assert sweeps.shape == relk.shape
-    assert sweeps[0] > int(n_sweeps / 3) - 1  # checkpoints are post-burn
-    expected = relative_error(np.exp(np.full((ny, nx), 0.6)), truth_k)
-    np.testing.assert_allclose(relk, expected, rtol=0, atol=1e-12)
+    relk = np.array([0.55, 0.50, 0.47, 0.46, 0.52, 0.63, 0.75, 0.85, 0.88])
+    assert _reversal_onset(relk, burn_fraction=0.0) is not None
+    # a monotone descent (no rise yet, as at 900 sweeps) is not a reversal
+    descending = np.array([0.55, 0.53, 0.51, 0.49, 0.48, 0.47])
+    assert _reversal_onset(descending, burn_fraction=0.0) is None

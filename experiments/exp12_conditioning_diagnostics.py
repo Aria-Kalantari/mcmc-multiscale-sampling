@@ -12,25 +12,27 @@ Two subcommands, one per probe:
       pi(G|Y). The scale-invariance is proved exactly in
       tests/test_conditioning_diagnostics.py; here it is illustrated.
 
-  (b) refresh -- sweep cond_refresh_period K in {1,2,4,8,16} on
-      red_black_conditioned_sampler in the global_field posterior regime that
-      exhibits the rel-k reversal, and plot the reversal trajectory per K. The
-      metric is the rel-k of the POOLED posterior-mean field across N independent
-      chains that share one truth: single chains only plateau (~0.75 on 48x48);
-      pooling across chains cancels per-chain drift and exposes the documented
-      descend-then-rise (0.4629 -> 0.8855). The reduced 16x16 grid does NOT host
-      the reversal (best pooled floor ~0.88); the study runs on the full 48x48
-      config by default. Hypothesis: a larger K DELAYS the reversal onset.
+  (b) refresh -- sweep cond_refresh_period K in {1,2,4,8,16} and plot the
+      reversal trajectory per K. To guarantee the K=1 row reproduces the
+      documented global_field reversal (pooled posterior-mean rel-k 0.4629 ->
+      0.8855), it REUSES exp08c's validated recovery pipeline verbatim
+      (``_red_black_chain`` per-state-stride collection + shared-truth
+      ``_TruthReplayGenerator`` + ``_trajectory``), threading only
+      ``cond_refresh_period=K`` into the sampler. Since ``K=1`` is bit-for-bit the
+      default sampler, the K=1 curve equals exp08c's reference and K>1 is directly
+      comparable. Needs the full 48x48 config (single chains only plateau ~0.75;
+      pooling across chains exposes the descent). Defaults: full 48x48, Mb=16,
+      4 chains, 2000 sweeps. Hypothesis: a larger K DELAYS the reversal onset.
       Mitigation, not a cure (SPEC 0 [V4] closure 1).
 
 Run (from the repository root):
 
   python -m experiments.exp12_conditioning_diagnostics standardize
-  # Full 48x48 pooled sweep (the real study; long -- hours, run overnight):
+  # Full 48x48 pooled sweep (the real study; ~5 h, run overnight):
   python -m experiments.exp12_conditioning_diagnostics refresh
-  # Cheap smoke test on the reduced grid (does NOT host the reversal):
+  # Cheap smoke test on the reduced grid (Mb=8; does NOT host the reversal):
   python -m experiments.exp12_conditioning_diagnostics refresh --reduced \
-      --n-sweeps 40 --n-chains 2 --ks 1,4
+      --Mb 8 --n-sweeps 60 --n-chains 2 --ks 1,4
 """
 
 from __future__ import annotations
@@ -61,7 +63,6 @@ from mcmc_multiscale.kle import top_eigenpairs  # noqa: E402
 from mcmc_multiscale.mcmc import metropolis_hastings  # noqa: E402
 from mcmc_multiscale.observations import make_truth, restrict_pressure  # noqa: E402
 from mcmc_multiscale.proposals import make_pcn_proposal  # noqa: E402
-from mcmc_multiscale.sampler import red_black_conditioned_sampler  # noqa: E402
 
 DEFAULT_OUT = ROOT / "outputs" / "exp12"
 
@@ -239,95 +240,55 @@ def _run_field_chain(
 # --------------------------------------------------------------------------- #
 # (b) refresh / reversal primitives
 # --------------------------------------------------------------------------- #
-def _pooled_relk_trajectory(
-    chain_fields: list[np.ndarray],
-    truth_k: np.ndarray,
-    burn_fraction: float = 1.0 / 3.0,
-    n_checkpoints: int = 24,
-) -> tuple[np.ndarray, np.ndarray]:
-    """Running rel-k of the POOLED posterior-mean field, at growing checkpoints.
+def _pooled_relk_trajectory(cfg: Config, K: int, args) -> tuple[np.ndarray, np.ndarray]:
+    """Pooled posterior-mean rel-k trajectory for cond_refresh_period=K.
 
-    ``chain_fields`` is one ``(n_sweeps, ny, nx)`` accepted-field array per chain
-    (all chains share one truth). Following the exp08c convention the first
-    ``burn_fraction`` of each chain is discarded, then at each checkpoint the
-    post-burn samples from every chain up to that prefix are pooled, averaged into
-    a single posterior-mean field, and scored by rel-k of ``exp(mean)``. Pooling
-    across independent chains is what cancels per-chain drift and exposes the
-    documented descend-then-rise -- a single chain only plateaus. Returns
-    ``(sweeps_axis, relk)`` where ``sweeps_axis`` is the 1-based sweep of each
-    checkpoint.
-    """
-    n_sweeps = chain_fields[0].shape[0]
-    burn = int(burn_fraction * n_sweeps)
-    if n_sweeps - burn < 2:
-        raise ValueError("burn-in leaves too few retained samples.")
-    retained = [fields[burn:] for fields in chain_fields]
-    n_ret = n_sweeps - burn
-    prefixes = sorted(
-        {
-            max(1, int(round(fr * n_ret)))
-            for fr in np.linspace(1.0 / n_checkpoints, 1.0, n_checkpoints)
-        }
-    )
-    sweeps_axis = np.asarray([burn + p for p in prefixes], dtype=np.int64)
-    relk = np.empty(len(prefixes), dtype=np.float64)
-    for i, p in enumerate(prefixes):
-        pooled = np.concatenate([r[:p] for r in retained], axis=0)
-        g_mean = pooled.mean(axis=0)
-        relk[i] = relative_error(permeability_from_log_field(g_mean), truth_k)
-    return sweeps_axis, relk
-
-
-def _run_pooled_chains(
-    cfg: Config,
-    K: int,
-    n_chains: int,
-    n_sweeps: int,
-    Mb: int,
-    beta: float,
-    seed: int,
-    initial_scale: float,
-) -> tuple[list[np.ndarray], np.ndarray]:
-    """Run ``n_chains`` independent chains sharing one truth, at refresh period K.
-
-    Uses the exp08 ``_TruthReplayGenerator`` so every chain targets the SAME
-    posterior (shared truth / observations) while starting from an independent
-    field -- the pooled posterior mean is only meaningful across chains that share
-    the truth. Returns ``(chain_fields, truth_k)``.
+    Reuses exp08c's validated recovery pipeline verbatim -- the SAME
+    ``_red_black_chain`` (per-state stride collection, shared-truth
+    ``_TruthReplayGenerator``, chain seeds ``seed + 1000 + i``) and ``_trajectory``
+    (pooled posterior-mean rel-k at growing post-burn checkpoints) that reproduce
+    the documented ``global_field`` reversal (rel-k 0.4629 -> 0.8855). The ONLY
+    delta is threading ``cond_refresh_period=K`` into the sampler. Because
+    ``K=1`` is bit-for-bit the default sampler, the K=1 row is guaranteed to equal
+    exp08c's reference; K>1 rows are directly comparable. Returns
+    ``(sweeps_axis, relk)`` over the checkpoints.
     """
     # Lazy import so exp12's module import stays light (tests import exp12).
-    from experiments.exp08_convergence_diagnostics import (
-        _TruthReplayGenerator,
-        _truth_replay_prefix,
-    )
+    from experiments.exp08_convergence_diagnostics import _truth_replay_prefix
+    from experiments.exp08c_recovery_decision import _red_black_chain, _trajectory
 
     n_sub = cfg.n_coarse_x * cfg.n_coarse_y
     truth, truth_draw, noise_draw = _truth_replay_prefix(cfg)
-    chain_fields: list[np.ndarray] = []
-    for i in range(n_chains):
-        rng = _TruthReplayGenerator(
-            theta_true_draw=truth_draw,
-            noise_draw=noise_draw,
-            chain_seed=seed + 100 + i,
-            n_initial_draws=1 + n_sub,
-            initial_scale=initial_scale,
+    Phi, lam = _global_kle(cfg)
+    seeds = [args.seed + 1000 + i for i in range(args.n_chains)]
+    chains = []
+    for i, chain_seed in enumerate(seeds):
+        chains.append(
+            _red_black_chain(
+                cfg,
+                truth_draw,
+                noise_draw,
+                Phi,
+                lam,
+                chain_seed=chain_seed,
+                n_sweeps=args.n_sweeps,
+                Mb=args.Mb,
+                beta=cfg.beta,
+                burn_fraction=args.burn_fraction,
+                sample_stride=args.sample_stride,
+                wall_cap_seconds=1.0e12,
+                prior_mode=_REFRESH_PRIOR_MODE,
+                cond_refresh_period=K,
+            )
         )
-        fields = np.empty((n_sweeps, cfg.ny, cfg.nx), dtype=np.float64)
-        for state in red_black_conditioned_sampler(
-            cfg,
-            n_sweeps=n_sweeps,
-            Mb=Mb,
-            theta_p_method=_REFRESH_THETA_P,
-            rng=rng,  # type: ignore[arg-type]
-            beta=beta,
-            acceptance=_REFRESH_ACCEPTANCE,
-            prior_mode=_REFRESH_PRIOR_MODE,
-            cond_refresh_period=K,
-        ):
-            fields[state.sweep - 1] = state.G_accepted
-        chain_fields.append(fields)
-        print(f"    chain {i + 1}/{n_chains} done", flush=True)
-    return chain_fields, truth.k_true
+        print(f"    chain {i + 1}/{args.n_chains} done", flush=True)
+    noise_floor = 0.5 * cfg.n_obs_x * cfg.n_obs_y
+    points = _trajectory(chains, truth, noise_floor, n_points=args.checkpoints)
+    sweeps = np.asarray(
+        [p.mean_updates_per_chain / n_sub for p in points], dtype=np.float64
+    )
+    relk = np.asarray([p.relative_k_error for p in points], dtype=np.float64)
+    return sweeps, relk
 
 
 def _reversal_onset(
@@ -684,18 +645,9 @@ def run_refresh(args: argparse.Namespace) -> None:
     onsets: list[int | None] = []
     for K in ks:
         print(f"  K={K} ...", flush=True)
-        chain_fields, truth_k = _run_pooled_chains(
-            cfg,
-            K,
-            args.n_chains,
-            args.n_sweeps,
-            args.Mb,
-            cfg.beta,
-            args.seed,
-            args.initial_scale,
-        )
-        sweeps, relk = _pooled_relk_trajectory(chain_fields, truth_k)
-        onset = _reversal_onset(relk)
+        sweeps, relk = _pooled_relk_trajectory(cfg, K, args)
+        # The trajectory checkpoints are already post-burn, so no further burn.
+        onset = _reversal_onset(relk, burn_fraction=0.0)
         axes_relks.append((sweeps, relk))
         onsets.append(onset)
         # Incremental save so a crash mid-run keeps completed K's.
@@ -743,8 +695,10 @@ def main() -> None:
     b.add_argument("--ks", type=str, default=",".join(str(k) for k in _DEFAULT_KS))
     b.add_argument("--n-sweeps", type=int, default=2000)
     b.add_argument("--n-chains", type=int, default=4)
-    b.add_argument("--Mb", type=int, default=8)
-    b.add_argument("--initial-scale", type=float, default=1.0)
+    b.add_argument("--Mb", type=int, default=16)
+    b.add_argument("--burn-fraction", type=float, default=1.0 / 3.0)
+    b.add_argument("--sample-stride", type=int, default=16)
+    b.add_argument("--checkpoints", type=int, default=40)
     b.add_argument(
         "--reduced",
         action="store_true",

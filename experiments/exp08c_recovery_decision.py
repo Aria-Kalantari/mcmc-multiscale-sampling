@@ -353,6 +353,7 @@ def _red_black_chain(
     sample_stride: int,
     wall_cap_seconds: float,
     prior_mode: str,
+    cond_refresh_period: int = 1,
 ) -> DecisionChain:
     n_subdomains = cfg.n_coarse_x * cfg.n_coarse_y
     rng = _TruthReplayGenerator(
@@ -371,6 +372,7 @@ def _red_black_chain(
         beta=beta,
         acceptance="posterior",
         prior_mode=prior_mode,
+        cond_refresh_period=cond_refresh_period,
     )
 
     def field_and_misfit(
