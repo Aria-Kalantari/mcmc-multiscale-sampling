@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mcmc_multiscale.config import Config
 from mcmc_multiscale.diagnostics import (
     constraint_residual,
     expected_gaussian_norm,
+    gelman_rubin,
     integrated_autocorr_time,
     interface_jump,
+    mpsrf,
     relative_error,
     running_acceptance,
     theta_norm,
@@ -53,3 +56,57 @@ def test_interface_jump_wrapper() -> None:
     G = np.zeros((cfg.ny, cfg.nx), dtype=np.float64)
 
     assert interface_jump(G, sub) == 0.0
+
+
+def test_mpsrf_reduces_to_gelman_rubin() -> None:
+    # For a single parameter, MPSRF must equal the scalar Gelman-Rubin exactly.
+    for seed in (0, 1, 7, 42):
+        rng = np.random.default_rng(seed)
+        m, n = 5, 400
+        chains = np.empty((m, n), dtype=np.float64)
+        for j in range(m):
+            chains[j] = rng.normal(loc=0.3 * j, scale=1.0 + 0.2 * j, size=n)
+        assert abs(mpsrf(chains[:, :, None]) - gelman_rubin(chains)) < 1e-12
+
+
+def test_mpsrf_wellmixed_near_one() -> None:
+    rng = np.random.default_rng(3)
+    chains = rng.standard_normal((6, 4000, 3))
+    assert 0.9 < mpsrf(chains) < 1.05
+
+
+def test_mpsrf_offset_greater_than_one() -> None:
+    rng = np.random.default_rng(5)
+    m, n, p = 4, 500, 2
+    shifts = np.array([[0.0, 0.0], [3.0, 0.0], [0.0, 3.0], [3.0, 3.0]])
+    chains = np.empty((m, n, p), dtype=np.float64)
+    for j in range(m):
+        chains[j] = rng.standard_normal((n, p)) + shifts[j]
+    assert mpsrf(chains) > 1.2
+
+
+def test_mpsrf_invariant_under_common_linear_map() -> None:
+    # MPSRF is a generalized-eigenvalue statistic of the pencil (V_hat, W); a
+    # common invertible reparameterization x -> A x leaves it unchanged.
+    rng = np.random.default_rng(11)
+    m, n, p = 4, 600, 3
+    scales = np.array([1.0, 0.3, 2.0])
+    shifts = rng.standard_normal((m, p))
+    chains = np.empty((m, n, p), dtype=np.float64)
+    for j in range(m):
+        chains[j] = rng.standard_normal((n, p)) * scales + shifts[j]
+    A = rng.standard_normal((p, p)) + p * np.eye(p)  # well-conditioned, invertible
+    mapped = chains @ A.T
+    assert abs(mpsrf(chains) - mpsrf(mapped)) < 1e-8
+
+
+def test_mpsrf_raises_when_samples_not_exceed_params() -> None:
+    with pytest.raises(ValueError, match="n_samples > n_params"):
+        mpsrf(np.zeros((4, 3, 5), dtype=np.float64))
+
+
+def test_mpsrf_validates_shape() -> None:
+    with pytest.raises(ValueError, match="shape"):
+        mpsrf(np.zeros((4, 10), dtype=np.float64))
+    with pytest.raises(ValueError, match="at least two chains"):
+        mpsrf(np.zeros((1, 10, 2), dtype=np.float64))

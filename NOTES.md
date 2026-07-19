@@ -611,3 +611,153 @@
   parametrised over `scan_order in {"systematic","red_black"}`, and the
   linear-Gaussian exactness gate is parametrised over forward/reversed core
   order; both pass, confirming order-independence.
+
+## M14 Conditioning Diagnostics (experiment-only, NOT recovery claims)
+
+- Both probes are **mechanism evidence for the analysis paper**, never recovery.
+  SPEC 0 [V4] closure 1 is settled: the repeated-conditioning route cannot be
+  repaired (incompatible local-KLE conditionals), so nothing here can rescue it.
+  All new code is additive; the three samplers' semantics are unchanged.
+  `experiments/exp12_conditioning_diagnostics.py` (subcommands `standardize`,
+  `refresh`), tests in `tests/test_conditioning_diagnostics.py` and
+  `tests/test_cond_refresh_period.py`.
+- **(a) Standardization probe.** Replacing the log-perm field `G` by
+  `(G - mean(G)) / std(G)` before the forward solve does **not** fix the drift --
+  it makes the drift **invisible to the likelihood**. Because
+  `standardize(a*G) = standardize(G)` for `a > 0` and `G = Phi sqrt(lam) theta`,
+  the standardized misfit is exactly invariant under `theta -> a*theta`: the data
+  is blind to the KLE amplitude `||theta||`, which is precisely the scale the
+  drift lives in. So the standardized posterior reverts to the prior in the
+  amplitude direction and does **not** target `pi(G|Y)`. This is proved exactly
+  (no Monte Carlo) by
+  `test_standardization_makes_likelihood_scale_invariant_diagnostic_only`. In
+  `exp12 standardize` (reduced 16x16), over an amplitude sweep `a in [0.3, 3.0]`
+  the true-target misfit sweeps `1415 -> 13963` while the standardized misfit is
+  flat to `5e-14` relative. The standardized chain lands at rel-k `1.14` vs the
+  true target's `0.34`, but rel-k across the two is **not comparable** -- they are
+  different posteriors (pitfall 14); a lower standardized rel-k would be
+  meaningless. It changes the target, full stop.
+- **(b) `cond_refresh_period` (K).** New integer parameter on
+  `red_black_conditioned_sampler` that rebuilds the conditioning RHS `c` and
+  particular solution `theta_p` only every `K` sweeps (reusing a per-subdomain
+  cache in between). The cached block consumes no RNG, so the `rng` stream is
+  identical for every `K`; **default `K=1` reproduces the pre-change sampler
+  bit-for-bit**, pinned by the golden fixture
+  `tests/data/m14_red_black_golden.npz` (captured from the pristine sampler
+  before the change) in
+  `test_cond_refresh_period_default_reproduces_golden_fixture`.
+- The reversal it probes is the **`global_field` phenomenon**
+  (acceptance=posterior, prior_mode=global_field, theta_p=svd; the
+  likelihood-only path is the separate runaway, not this reversal).
+- **Measurement pitfalls found and fixed (important).** The documented reversal
+  (`0.4629 -> 0.8855`, NOTES M9) is the rel-k of the **pooled posterior-mean
+  field across independent chains**, at post-burn checkpoints -- NOT the
+  instantaneous accepted-field rel-k, and NOT a single chain. Three findings, in
+  order:
+  1. `_reversal_onset` originally detected "onset" on the noisy instantaneous
+     per-sweep rel-k and fired on the start-up transient. It now excludes a `1/3`
+     burn, requires a genuine descent below the post-burn start, and requires a
+     sustained (3-checkpoint) rise.
+  2. A first rebuild pooled per-**sweep** end-of-sweep fields across chains, on
+     the reduced 16x16 grid and then the full 48x48 grid. Neither reproduced the
+     reference: reduced single chains drift (`0.90 -> 1.3`), reduced pooled bottom
+     at `~0.88`, and full-48x48 K=1 floored at `0.81` (Mb=8) / `0.94` (Mb=16). So
+     `Mb` was NOT the cause, and per-sweep pooling with an off-by-900 chain-seed
+     offset did not match exp08c.
+  3. Running exp08c's OWN pipeline unchanged (`_red_black_chain` per-state stride
+     collection, chain seeds `seed + 1000 + i`, `Mb=16`, `_trajectory`)
+     **reproduces the reference**: pooled posterior-mean rel-k descends
+     `0.556 -> 0.470` by 900 sweeps (K=1), matching the documented `0.4629`. The
+     divergence was the collection convention + seed offset, not the grid or `Mb`.
+- **Fix:** `exp12 refresh` now **reuses exp08c's validated pipeline verbatim**
+  (`_red_black_chain` + `_trajectory`), threading only `cond_refresh_period=K`
+  into the sampler. `_red_black_chain` gained an additive `cond_refresh_period=1`
+  argument (default = unchanged; exp08c's own calls are byte-identical). Because
+  `K=1` is bit-for-bit the default sampler, the K=1 row is **guaranteed** to equal
+  exp08c's reference (confirmed: 0.4704 at 900 sweeps), so K>1 is directly
+  comparable. Defaults: full 48x48, `Mb=16`, 4 chains, 2000 sweeps (~5 h).
+  **[RESULTS PENDING the corrected 5-way run.]** Hypothesis unchanged: larger `K`
+  delays the reversal onset -- mitigation, not a cure (every `K` still reverses,
+  per closure 1). The reduced grid stays behind `--reduced` for cheap code tests.
+
+## M15 Posterior-Informed Basis (exp13, SPEC 3.12)
+
+**Question.** Aidan gets a large MCMC speedup by building a preconditioning basis
+from a converged pilot (64 chains x 100k, MPSRF ~40k) then sampling preconditioned
+in ~3-3.5k. The pilot costs ~2.6M solves -- roughly the un-preconditioned run
+itself. Does a basis from the adjoint Gauss-Newton **Laplace Hessian at the MAP**
+(a few hundred solves, no pilot) buy the same informed directions? Aidan's config:
+20x20, squared-exponential kernel, `l=0.16`, 24 KLE modes.
+
+**Library additions (each gated).** `covariance.sqexp_covariance` (SE kernel
+`sigma^2 exp(-||x-x'||^2 / (2 l^2))`; symmetry / unit-diagonal / PSD / hand-checked
+2-point tests). `diagnostics.mpsrf` -- multivariate PSRF (Brooks-Gelman 1998),
+`sqrt(lambda_max(W^{-1} V_hat))`, `V_hat = ((n-1)/n) W + B/n`; it **reduces exactly
+to the repo's `gelman_rubin`** for `n_params==1` (same `(m+1)/m`-free convention;
+verified to 0.0) -- tests: reduction, ->1 well-mixed, >1 offset, invariance under a
+common invertible linear map, and a `n_samples>n_params` guard (generalized `eigh`
+returns garbage on a singular `W` rather than raising).
+
+**Method (reuse only; no new sampler).** `exp13` mirrors `exp10` and drives the
+already-gated `lis.py`: `gauss_newton_map` + `build_informed_subspace_adjoint`
+(cheap basis), `informed_subspace_from_samples` (pilot basis), `make_lis_proposal`
+(exact posterior-targeting via the Laplace reference `q*`), `principal_angles`.
+SE truth is built **inline** (the shared `make_truth` hard-codes the exponential
+kernel). Cheap basis = **528 solves** (MAP 463 + one adjoint Jacobian 65).
+`make_lis_proposal` is a Laplace-*reference* sampler (sticks from prior-scale
+dispersed starts), so all methods start over-dispersed relative to the Laplace
+posterior (`beta_informed=0.6`, not the independence sampler); a `global_pcn_prior`
+control uses prior-scale starts. Principal angles are compared on the **top-r**
+columns (full-rank-vs-full-rank angles are trivially 0); cheap orders by descending
+GN eigenvalue, pilot by ascending sample variance -- the same physical directions.
+
+**`sigma_obs` regime (provisional -- CONFIRM with Aidan).** Aidan did not state
+`sigma_obs` or sensor count. At the originally-suggested `sigma_obs=1e-3` the
+posterior spans a ~200x range of per-mode scales, so **no single-beta pCN baseline
+can converge** (zero/near-zero acceptance) -- not the regime where Aidan measured a
+converging ~40k baseline. `sigma_obs=0.02` (sensors 8x8) compresses the range to
+~33x with a genuine 17-mode informed subspace; both are CLI flags, printed
+provisional.
+
+**Main result (`sigma_obs=0.02`, 8 chains, baseline beta swept for fairness).**
+The baseline beta-grid `{0.03: acc 0.52, 0.05: acc 0.31}` **both fail to reach
+MPSRF<=1.2 within 40k**; the best (beta=0.03) descends then **plateaus at
+MPSRF ~1.7** (30k->1.70, 40k->1.75), and the prior-scale control behaves
+identically -- so this is **intrinsic mixing on an anisotropic posterior, not a
+start-transient**. pCN is geometrically ergodic (it would converge eventually);
+this is *practical* non-convergence within budget. Preconditioning with the
+528-solve cheap basis converges in ~10k (`posterior_informed`; pilot basis ~6.4k),
+so speedup is `>4x` (lower bound at the 40k cap). Principal angles (cheap vs pilot):
+**top-5 `[1.3, 2.0, 3.6, 6.6, 9.2]` deg; 14/17 informed dirs <10 deg, 12 <5 deg** --
+the cheap basis buys the same informed directions as the pilot's 160k-solve basis
+(same subspace, ~303x cheaper). The convergence is the proof the basis is good; the
+angles corroborate it. Outputs: `outputs/exp13/exp13_table.md`, `exp13_mpsrf.png`.
+
+**We do NOT claim reproduction of Aidan's 10x.** This is a *harder* regime than his
+(his baseline converged at ~40k; ours plateaus, so `sigma=0.02` is more
+anisotropic). The honest framing: at `sigma=0.02` preconditioning is **necessary,
+not merely faster**; the exact regime is a to-confirm item with Aidan.
+
+**Regime map (`--sigma-sweep`, 6 chains, `outputs/exp13/exp13_sigma_sweep.*`).**
+Baseline beta tuned per sigma (fewest iters, else closest-to-converging). As
+`sigma_obs` shrinks the posterior grows more anisotropic and single-beta pCN
+crosses from converging to plateauing, while the cheap basis matches the pilot in
+every regime:
+
+| sigma | informed rank | baseline (final MPSRF) | cheap conv | pilot conv | top-5 angles (deg) |
+|---|---|---|---|---|---|
+| 0.10 | 8  | **converges 5969** | 859  | 859  | 1.4, 2.7, 5.1, 6.3, 20.3 |
+| 0.05 | 12 | plateau (1.24, at edge) | 1677 | 2621 | 2.2, 2.9, 3.8, 5.5, 20.6 |
+| 0.02 | 17 | plateau (2.88) | ~10k* | 8000 | 2.3, 2.9, 3.7, 6.2, 7.9 |
+
+At `sigma=0.1` (looser, converging baseline) the cheap basis gives a clean **~7x**
+(5969/859) against a fairly-tuned baseline -- a converged-baseline speedup in the
+same ballpark as Aidan's, at a different regime. Top-4 principal angles stay <7 deg
+in all three regimes, so the basis result is **not** an artifact of the `sigma`
+choice. (*`sigma=0.02` cheap shows n/a in the coarse 6-chain sweep -- 10k was just
+short with 6 chains; the 8-chain main run converges at 10k.)
+
+**Gates.** No new sampler correctness gates -- `make_lis_proposal` is already gated
+(no-data invariance, linear-Gaussian exactness, rank-0 = global pCN) and
+config-independent; the frozen-basis property is structural (`InformedSubspace` is
+a frozen dataclass). Only the two new library functions are gated (above).

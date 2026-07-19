@@ -601,6 +601,7 @@ def red_black_conditioned_sampler(
     rho: float | None = None,
     acceptance: str = "likelihood_only",
     prior_mode: str | None = None,
+    cond_refresh_period: int = 1,
 ) -> Iterator[RedBlackSamplerState]:
     """Run deterministic sequential red-black sweeps over all coarse subdomains.
 
@@ -608,10 +609,21 @@ def red_black_conditioned_sampler(
     all conditioning right-hand sides from one frozen global field snapshot,
     then applies same-color local updates sequentially in sorted row/column
     order. Pass `acceptance="posterior"` for the M8 global-prior baseline.
+
+    ``cond_refresh_period`` (M14(b) diagnostic) rebuilds the conditioning RHS
+    ``c`` and particular solution ``theta_p`` only every ``K`` sweeps and reuses
+    the cached values on the intervening sweeps. The default ``K=1`` rebuilds
+    every sweep, i.e. the unchanged behaviour, bit-for-bit. Freezing the
+    conditioning is a *mitigation* probe for the rel-k reversal, never a fix:
+    SPEC §0 [V4] closure 1 shows the repeated-conditioning route cannot be
+    repaired. The cached block consumes no RNG, so the ``rng`` stream is
+    identical for every ``K``.
     """
 
     if n_sweeps < 1:
         raise ValueError("n_sweeps must be at least 1.")
+    if cond_refresh_period < 1:
+        raise ValueError("cond_refresh_period must be at least 1.")
     _validate_conditioning_options(theta_p_method, conditioning_mode, rhs_mode, rho)
     _validate_acceptance(acceptance)
     prior_mode_value = cfg.prior_mode if prior_mode is None else prior_mode
@@ -647,25 +659,36 @@ def red_black_conditioned_sampler(
     }
     expected_norm = expected_gaussian_norm(Next)
 
+    # M14(b): cache of (c_used, theta_p, Z, cond_A, cond_B) per subdomain key,
+    # rebuilt only on refresh sweeps. Empty at K=1 has no effect (every sweep
+    # refreshes). The cached block is deterministic (no RNG), so the rng stream
+    # is unchanged for any cond_refresh_period.
+    cond_cache: dict[tuple[int, int], tuple] = {}
+
     for sweep in range(1, n_sweeps + 1):
+        refresh = (sweep - 1) % cond_refresh_period == 0
         for color in (0, 1):
             frozen_for_color = G_accepted.copy()
             frozen_vec = frozen_for_color.ravel(order="F")
 
             for data in local_by_color[color]:
                 key = (data.row, data.col)
-                c_data = build_c(
-                    frozen_vec, data.sub.local_global_idx, data.cond_local_idx
-                )
-                c_used = np.zeros_like(c_data) if rhs_mode == "zero" else c_data
-                theta_p, Z, cond_A, cond_B = _solve_local_conditioning(
-                    data.A,
-                    c_used,
-                    Next,
-                    theta_p_method,
-                    conditioning_mode,
-                    rhs_mode,
-                )
+                if refresh or key not in cond_cache:
+                    c_data = build_c(
+                        frozen_vec, data.sub.local_global_idx, data.cond_local_idx
+                    )
+                    c_used = np.zeros_like(c_data) if rhs_mode == "zero" else c_data
+                    theta_p, Z, cond_A, cond_B = _solve_local_conditioning(
+                        data.A,
+                        c_used,
+                        Next,
+                        theta_p_method,
+                        conditioning_mode,
+                        rhs_mode,
+                    )
+                    cond_cache[key] = (c_used, theta_p, Z, cond_A, cond_B)
+                else:
+                    c_used, theta_p, Z, cond_A, cond_B = cond_cache[key]
 
                 theta_local_current = theta_local_by_subdomain[key]
                 theta_proposed = _proposal_from_current(

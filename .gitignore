@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 outputs/
 *.npz
+!tests/data/*.npz
 *.mat
 *.zip
 .DS_Store
